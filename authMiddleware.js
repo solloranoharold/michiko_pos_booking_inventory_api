@@ -1,0 +1,32 @@
+const admin = require('./firebaseAdmin');
+
+async function requireAuthHeader(req, res, next) {
+  // Skip auth check for the getAccountByEmail and getEmailClient endpoints
+  if (
+    req.path.startsWith('/api/clients/getEmailClient')
+  ) {
+    return next();
+  }
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ error: 'Authorization header missing' });
+  }
+  if (!authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authorization header must start with Bearer' });
+  }
+  const token = authHeader.slice(7).trim();
+  if (!token) {
+    return res.status(401).json({ error: 'Bearer token missing' });
+  }
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    // console.log(decodedToken , 'decodedToken')
+    req.user = decodedToken; // Optionally attach user info to request
+    next();
+  } catch (error) {
+    console.error('Error verifying ID token:', error);
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+}
+
+module.exports = requireAuthHeader; 

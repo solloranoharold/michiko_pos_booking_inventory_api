@@ -1,0 +1,23 @@
+{
+  "name": "michiko_pos_booking_api",
+  "version": "1.0.0",
+  "description": "Node.js API for CRUD operations on clients using Firestore",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "7.11.3",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^4.18.2",
+    "firebase": "^12.0.0",
+    "firebase-admin": "^13.4.0",
+    "google-auth-library": "^10.1.0",
+    "moment": "^2.30.1",
+    "nodemon": "^3.1.10",
+    "uuid": "^11.1.0"
+  }
+}
