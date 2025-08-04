@@ -1,6 +1,10 @@
 const express = require('express');
 const admin = require('../firebaseAdmin');
 const { v4: uuidv4 } = require('uuid');
+const multer = require('multer');
+const xlsx = require('xlsx');
+const csv = require('csv-parser');
+const path = require('path');
 
 const router = express.Router();
 const SERVICES_COLLECTION = 'services';
@@ -331,6 +335,270 @@ router.get('/getServicesByPriceRange', async (req, res) => {
   }
 });
 
+// Configure multer for file uploads (memory storage)
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = [
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+      'application/vnd.ms-excel', // .xls
+      'text/csv', // .csv
+      'application/csv' // .csv alternative
+    ];
+    
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only Excel (.xlsx, .xls) and CSV files are allowed'), false);
+    }
+  },
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  }
+}).fields([
+  { name: 'file', maxCount: 1 },
+  { name: 'branch_id', maxCount: 1 }
+]);
 
+// Download services template
+router.get('/downloadTemplate', (req, res) => {
+  try {
+    const fs = require('fs');
+    const templatePath = path.join(__dirname, '../sample_services_template.csv');
+    
+    if (!fs.existsSync(templatePath)) {
+      return res.status(404).json({ error: 'Template file not found' });
+    }
+
+    // Set proper headers for file download
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="services_template.csv"');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    
+    // Read and send the file
+    const fileStream = fs.createReadStream(templatePath);
+    fileStream.pipe(res);
+    
+    // Handle stream errors
+    fileStream.on('error', (error) => {
+      console.error('Error reading template file:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error reading template file' });
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error downloading template:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Upload Excel/CSV file to insert services
+router.post('/uploadServices', upload, async (req, res) => {
+  try {
+    if (!req.files || !req.files.file || req.files.file.length === 0) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Get branch_id from query parameters, form body, or form fields (query params take priority)
+    let branch_id = req.query.branch_id;
+    if (!branch_id && req.body && req.body.branch_id) {
+      branch_id = req.body.branch_id;
+    }
+    if (!branch_id && req.files.branch_id && req.files.branch_id.length > 0) {
+      branch_id = req.files.branch_id[0].buffer.toString();
+    }
+    
+    if (!branch_id) {
+      return res.status(400).json({ 
+        error: 'branch_id is required. Provide it as a query parameter (?branch_id=xxx), in the form body, or as a form field' 
+      });
+    }
+
+
+    const fileBuffer = req.files.file[0].buffer;
+    const fileExtension = path.extname(req.files.file[0].originalname).toLowerCase();
+    let services = [];
+
+    // Parse file based on extension
+    if (fileExtension === '.csv') {
+      // Parse CSV file from buffer
+      const results = [];
+      await new Promise((resolve, reject) => {
+        const stream = require('stream');
+        const readable = new stream.Readable();
+        readable.push(fileBuffer);
+        readable.push(null);
+        
+        readable
+          .pipe(csv())
+          .on('data', (data) => results.push(data))
+          .on('end', () => resolve())
+          .on('error', (error) => reject(error));
+      });
+      services = results;
+    } else if (fileExtension === '.xlsx' || fileExtension === '.xls') {
+      // Parse Excel file from buffer
+      const workbook = xlsx.read(fileBuffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      services = xlsx.utils.sheet_to_json(worksheet);
+    } else {
+      return res.status(400).json({ error: 'Unsupported file format' });
+    }
+
+    if (services.length === 0) {
+      return res.status(400).json({ error: 'No data found in the uploaded file' });
+    }
+
+    // Validate required columns
+    const requiredColumns = ['name', 'description', 'category', 'price'];
+    const firstRow = services[0];
+    const missingColumns = requiredColumns.filter(col => !(col in firstRow));
+    
+    if (missingColumns.length > 0) {
+      return res.status(400).json({ 
+        error: `Missing required columns: ${missingColumns.join(', ')}` 
+      });
+    }
+
+    // Get existing services for duplicate checking
+    const servicesRef = admin.firestore().collection(SERVICES_COLLECTION);
+    const existingServicesSnapshot = await servicesRef
+      .where('branch_id', '==', branch_id)
+      .get();
+    
+    const existingServices = new Set();
+    existingServicesSnapshot.docs.forEach(doc => {
+      const service = doc.data();
+      existingServices.add(service.name.toLowerCase().trim());
+    });
+
+    const results = {
+      inserted: 0,
+      skipped: 0,
+      errors: 0,
+      details: []
+    };
+
+    // Process services in batches for better performance
+    const batchSize = 50; // Process 50 services at a time
+    const batches = [];
+    
+    for (let i = 0; i < services.length; i += batchSize) {
+      batches.push(services.slice(i, i + batchSize));
+    }
+
+    // Process each batch
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      const batchPromises = batch.map(async (row, batchItemIndex) => {
+        const globalIndex = batchIndex * batchSize + batchItemIndex;
+        const rowNumber = globalIndex + 2; // +2 because Excel/CSV is 1-indexed and we have headers
+
+        try {
+          // Validate required fields
+          if (!row.name || !row.description || !row.category || !row.price) {
+            return {
+              row: rowNumber,
+              status: 'error',
+              message: 'Missing required fields'
+            };
+          }
+
+          // Validate price
+          const price = parseFloat(row.price);
+          if (isNaN(price) || price <= 0) {
+            return {
+              row: rowNumber,
+              status: 'error',
+              message: 'Invalid price - must be a positive number'
+            };
+          }
+
+          // Check for duplicates
+          const serviceName = row.name.toLowerCase().trim();
+          if (existingServices.has(serviceName)) {
+            return {
+              row: rowNumber,
+              status: 'skipped',
+              message: 'Service with this name already exists'
+            };
+          }
+
+          // Create service data
+          const serviceId = uuidv4();
+          const dateCreated = new Date().toISOString();
+          
+          // Format category: lowercase and replace spaces with hyphens
+          const formattedCategory = row.category.trim().toLowerCase().replace(/\s+/g, '-');
+          
+          const serviceData = {
+            id: serviceId,
+            name: row.name.trim(),
+            description: row.description.trim(),
+            category: formattedCategory,
+            price: price,
+            status: row.status || 'active',
+            branch_id: branch_id,
+            date_created: dateCreated,
+            doc_type: 'SERVICES'
+          };
+
+          // Insert service
+          await servicesRef.doc(serviceId).set(serviceData);
+          
+          // Add to existing services set to prevent duplicates within the same upload
+          existingServices.add(serviceName);
+          
+          return {
+            row: rowNumber,
+            status: 'inserted',
+            message: 'Service created successfully'
+          };
+
+        } catch (error) {
+          return {
+            row: rowNumber,
+            status: 'error',
+            message: error.message
+          };
+        }
+      });
+
+      // Wait for all services in this batch to complete
+      const batchResults = await Promise.all(batchPromises);
+      
+      // Process batch results
+      batchResults.forEach(result => {
+        results.details.push(result);
+        if (result.status === 'inserted') {
+          results.inserted++;
+        } else if (result.status === 'skipped') {
+          results.skipped++;
+        } else if (result.status === 'error') {
+          results.errors++;
+        }
+      });
+    }
+
+    res.status(200).json({
+      message: 'File processing completed',
+      summary: {
+        totalRows: services.length,
+        inserted: results.inserted,
+        skipped: results.skipped,
+        errors: results.errors
+      },
+      details: results.details
+    });
+
+  } catch (error) {
+    console.error('Error processing uploaded file:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 module.exports = router;

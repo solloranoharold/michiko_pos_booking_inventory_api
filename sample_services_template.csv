@@ -1,0 +1,9 @@
+name,description,category,price,status
+Haircut,Basic haircut service,Hair Services,25.00,active
+Hair Coloring,Professional hair coloring service,Hair Services,75.00,active
+Manicure,Basic nail care and polish,Nail Services,30.00,active
+Pedicure,Complete foot care and polish,Nail Services,45.00,active
+Facial,Deep cleansing facial treatment,Skin Care,60.00,active
+Massage,Relaxing body massage,Massage,80.00,active
+Waxing,Body hair removal service,Hair Removal,35.00,active
+Makeup,Professional makeup application,Beauty,50.00,active 

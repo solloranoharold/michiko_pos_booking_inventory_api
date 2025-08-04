@@ -1,0 +1,11 @@
+name,price,quantity,min_quantity,brand,status
+Shampoo,15.50,100,10,Head & Shoulders,active
+Conditioner,18.75,80,8,Pantene,active
+Toothpaste,8.25,150,15,Colgate,active
+Toothbrush,5.00,200,20,Oral-B,active
+Soap,3.50,120,12,Dove,active
+Deodorant,12.00,90,9,Axe,active
+Vitamins,25.00,50,5,Centrum,active
+Pain Reliever,10.50,75,8,Advil,active
+Bandages,6.75,100,10,Band-Aid,active
+Antiseptic,9.25,60,6,Betadine,active 

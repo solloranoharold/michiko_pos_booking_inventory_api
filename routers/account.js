@@ -19,10 +19,16 @@ router.get('/', (req, res) => {
 // CREATE account
 router.post('/insertAccount', async (req, res) => {
   try {
-    const { email, role, branch_id = null } = req.body;
+    const { email, role, branch_id = null, position } = req.body;
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
     }
+    
+    // Check if position is required for staff role
+    if (role === 'staff' && !position) {
+      return res.status(400).json({ error: 'Position is required for staff role' });
+    }
+    
     // Check if account already exists
     const snapshot = await firestore.collection(ACCOUNTS_COLLECTION).where('email', '==', email).get();
     if (!snapshot.empty) {
@@ -39,6 +45,7 @@ router.post('/insertAccount', async (req, res) => {
       date_created: getCurrentDate(),
       branch_id: branch_id,
       name:'',
+      position: position || '',
       commisions:[],
       total_commisions:0,
       government_ids:[],
@@ -157,7 +164,13 @@ router.get('/getAccountByEmail/:email', async (req, res) => {
 router.put('/updateAccount/:email', async (req, res) => {
   try {
     const { email } = req.params;
-    const { status, role, branch_id = null ,name,government_ids } = req.body;
+    const { status, role, branch_id = null, name, government_ids, position } = req.body;
+    
+    // Check if position is required for staff role
+    if (role === 'staff' && !position) {
+      return res.status(400).json({ error: 'Position is required for staff role' });
+    }
+    
     const docRef = firestore.collection(ACCOUNTS_COLLECTION).doc(email);
     const docSnap = await docRef.get();
     if (!docSnap.exists) {
@@ -169,6 +182,7 @@ router.put('/updateAccount/:email', async (req, res) => {
     if (branch_id !== undefined) updateData.branch_id = branch_id;
     if (name !== undefined) updateData.name = name;
     if (government_ids !== undefined) updateData.government_ids = government_ids;
+    if (position !== undefined) updateData.position = position;
     await docRef.update(updateData);
     // Get updated account
     const updatedSnap = await docRef.get();
