@@ -539,7 +539,7 @@ router.post('/uploadServices', upload, async (req, res) => {
             description: row.description.trim(),
             category: await getCategoryId(row.category, branch_id),
             price: price,
-            status: row.status || 'active',
+            status: row.status.trim() || 'active',
             branch_id: branch_id,
             date_created: dateCreated,
             doc_type: 'SERVICES'

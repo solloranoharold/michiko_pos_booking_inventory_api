@@ -432,7 +432,7 @@ router.post('/uploadServicesProducts', upload.single('file'), async (req, res) =
             min_quantity: min_quantity,
             price: price,
             brand: row.brand.trim(), // Add brand to product data
-            status: row.status || 'active',
+            status: row.status.trim() || 'active',
             branch_id: branch_id,
             date_created: dateCreated
           };
