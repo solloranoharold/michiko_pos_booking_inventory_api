@@ -19,7 +19,7 @@ router.get('/', (req, res) => {
 // CREATE account
 router.post('/insertAccount', async (req, res) => {
   try {
-    const { email, role, branch_id = null, position } = req.body;
+    const { email, role, branch_id = null, position, commission_rate } = req.body;
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
     }
@@ -27,6 +27,16 @@ router.post('/insertAccount', async (req, res) => {
     // Check if position is required for staff role
     if (role === 'staff' && !position) {
       return res.status(400).json({ error: 'Position is required for staff role' });
+    }
+    
+    // Check if commission_rate is required for staff role
+    if (role === 'staff' && commission_rate === undefined) {
+      return res.status(400).json({ error: 'Commission rate is required for staff role' });
+    }
+    
+    // Validate commission_rate is a number between 0 and 100 for staff
+    if (role === 'staff' && (isNaN(commission_rate) || commission_rate < 0 || commission_rate > 100)) {
+      return res.status(400).json({ error: 'Commission rate must be a number between 0 and 100 for staff role' });
     }
     
     // Check if account already exists
@@ -46,6 +56,7 @@ router.post('/insertAccount', async (req, res) => {
       branch_id: branch_id,
       name:'',
       position: position || '',
+      commission_rate: role === 'staff' ? commission_rate : null,
       commisions:[],
       total_commisions:0,
       government_ids:[],
@@ -140,6 +151,49 @@ router.get('/getAllAccountsNoPagination/:branch_id', async (req, res) => {
   }
 });
 
+// READ accounts with positions per branch_id
+router.get('/getAccountsWithPositions/:branch_id', async (req, res) => {
+  try {
+    const { branch_id } = req.params;
+    
+    let queryRef = firestore.collection(ACCOUNTS_COLLECTION);
+
+    // Apply branch filter
+    queryRef = queryRef.where('branch_id', '==', branch_id);
+    
+    // Filter for active accounts only
+    queryRef = queryRef.where('status', '==', 'active');
+
+    // Filter for Senior and Junior positions only
+    queryRef = queryRef.where('position', 'in', ['Senior', 'Junior']);
+
+    // Fetch all data
+    const snapshot = await queryRef.get();
+    const accounts = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: data.id,
+        email: data.email,
+        name: data.name,
+        position: data.position,
+        role: data.role,
+        commission_rate: data.commission_rate,
+        status: data.status
+      };
+    });
+
+    
+
+    return res.status(200).json({ 
+      data: accounts,
+      totalAccounts: accounts.length
+    });
+  } catch (error) {
+    console.error('Error fetching accounts with positions:', error);
+    res.status(500).json({ error: 'Failed to fetch accounts with positions' });
+  }
+});
+
 // READ single account by email
 router.get('/getAccountByEmail/:email', async (req, res) => {
   try {
@@ -164,11 +218,21 @@ router.get('/getAccountByEmail/:email', async (req, res) => {
 router.put('/updateAccount/:email', async (req, res) => {
   try {
     const { email } = req.params;
-    const { status, role, branch_id = null, name, government_ids, position } = req.body;
+    const { status, role, branch_id = null, name, government_ids, position, commission_rate = 0 } = req.body;
     
     // Check if position is required for staff role
     if (role === 'staff' && !position) {
       return res.status(400).json({ error: 'Position is required for staff role' });
+    }
+    
+    // Check if commission_rate is required for staff role
+    if (role === 'staff' && commission_rate === undefined) {
+      return res.status(400).json({ error: 'Commission rate is required for staff role' });
+    }
+    
+    // Validate commission_rate is a number between 0 and 100 for staff
+    if (role === 'staff' && (isNaN(commission_rate) || commission_rate < 0 || commission_rate > 100)) {
+      return res.status(400).json({ error: 'Commission rate must be a number between 0 and 100 for staff role' });
     }
     
     const docRef = firestore.collection(ACCOUNTS_COLLECTION).doc(email);
@@ -183,6 +247,7 @@ router.put('/updateAccount/:email', async (req, res) => {
     if (name !== undefined) updateData.name = name;
     if (government_ids !== undefined) updateData.government_ids = government_ids;
     if (position !== undefined) updateData.position = position;
+    if (commission_rate !== undefined) updateData.commission_rate = role === 'staff' ? commission_rate : null;
     await docRef.update(updateData);
     // Get updated account
     const updatedSnap = await docRef.get();

@@ -8,6 +8,43 @@ const csv = require('csv-parser');
 const path = require('path');
 
 const COLLECTION = 'services_products';
+const USED_QUANTITIES_COLLECTION = 'used_quantities';
+
+// Helper function to track used quantities
+async function trackUsedQuantities(productId, productName, branchId, oldQuantity, newQuantity, reason = 'quantity_update') {
+  try {
+    const quantityDifference = oldQuantity - newQuantity;
+    
+    // Track all quantity changes (both increases and decreases)
+    if (quantityDifference !== 0) {
+      const usedQuantityId = uuidv4();
+      const usedQuantityData = {
+        id: usedQuantityId,
+        transaction_id: null, // No transaction ID for manual updates
+        branch_id: branchId,
+        item_id: productId,
+        item_name: productName,
+        item_type: 'services_product',
+        quantity_used: quantityDifference > 0 ? quantityDifference : 0, // Positive for decreases
+        quantity_added: quantityDifference < 0 ? Math.abs(quantityDifference) : 0, // Positive for increases
+        unit_price: 0, // Not applicable for manual updates
+        total_value: 0, // Not applicable for manual updates
+        date_created: new Date().toISOString(),
+        doc_type: 'USED_QUANTITIES',
+        update_reason: reason,
+        change_type: quantityDifference > 0 ? 'decrease' : 'increase',
+        old_quantity: oldQuantity,
+        new_quantity: newQuantity
+      };
+
+      await admin.firestore().collection(USED_QUANTITIES_COLLECTION).doc(usedQuantityId).set(usedQuantityData);
+      console.log(`Tracked quantity change for service product ${productId}: ${quantityDifference > 0 ? 'decreased' : 'increased'} by ${Math.abs(quantityDifference)} units`);
+    }
+  } catch (error) {
+    console.error('Error tracking used quantities:', error);
+    // Don't throw error to avoid breaking the main update operation
+  }
+}
 
 // Create a new service product
 router.post('/insertServiceProduct', async (req, res) => {
@@ -121,10 +158,37 @@ router.get('/getServiceProduct/:id', async (req, res) => {
 router.put('/updateServiceProduct/:id', async (req, res) => {
   try {
     const { name, category, unit, quantity, total_value, status, branch_id, unit_value, min_quantity, price, brand } = req.body;
+    
+    // Get the current product data to compare quantities
+    const currentProductDoc = await admin.firestore().collection(COLLECTION).doc(req.params.id).get();
+    if (!currentProductDoc.exists) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    
+    const currentProduct = currentProductDoc.data();
+    const oldQuantity = currentProduct.quantity || 0;
+    const newQuantity = quantity !== undefined ? quantity : oldQuantity;
+    
     const updateData = { name, category, unit, quantity, total_value, status, branch_id, unit_value, min_quantity, price, brand };
     // Remove undefined fields
     Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
+    
+    // Update the product
     await admin.firestore().collection(COLLECTION).doc(req.params.id).update(updateData);
+    console.log(newQuantity , oldQuantity)
+    console.log(newQuantity !== oldQuantity)
+    // Track quantity changes if quantity was modified
+    if (newQuantity !== oldQuantity) {
+      await trackUsedQuantities(
+        req.params.id,
+        currentProduct.name,
+        currentProduct.branch_id,
+        oldQuantity,
+        newQuantity,
+        'quantity_update'
+      );
+    }
+    
     res.json({ message: 'Service product updated' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -357,11 +421,10 @@ router.post('/uploadServicesProducts', upload.single('file'), async (req, res) =
           const productId = uuidv4();
           const dateCreated = new Date().toISOString();
           const total_value = parseFloat((quantity * unit_value).toFixed(2));
-          const formattedCategory = row.category.trim().toLowerCase().replace(/\s+/g, '-');
           const productData = {
             id: productId,
             name: row.name.trim(),
-            category: formattedCategory,
+            category: await getCategoryId(row.category, branch_id),
             unit: row.unit.trim(),
             quantity: quantity,
             unit_value: unit_value,
@@ -428,4 +491,131 @@ router.post('/uploadServicesProducts', upload.single('file'), async (req, res) =
   }
 });
 
+// Update used quantities for a service product
+router.post('/updateUsedQuantity/:id', async (req, res) => {
+  try {
+    const { quantity_used, reason = 'manual_usage' } = req.body;
+    
+    if (!quantity_used || quantity_used <= 0) {
+      return res.status(400).json({ error: 'quantity_used must be a positive number' });
+    }
+
+    // Get the current product data
+    const currentProductDoc = await admin.firestore().collection(COLLECTION).doc(req.params.id).get();
+    if (!currentProductDoc.exists) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    
+    const currentProduct = currentProductDoc.data();
+    const currentQuantity = currentProduct.quantity || 0;
+    
+    // Check if there's enough quantity to use
+    if (currentQuantity < quantity_used) {
+      return res.status(400).json({ 
+        error: `Insufficient quantity. Available: ${currentQuantity}, Requested: ${quantity_used}` 
+      });
+    }
+    
+    // Calculate new quantity
+    const newQuantity = currentQuantity - quantity_used;
+    
+    // Update the product quantity
+    await admin.firestore().collection(COLLECTION).doc(req.params.id).update({
+      quantity: newQuantity
+    });
+    
+    // Track the used quantity
+    await trackUsedQuantities(
+      req.params.id,
+      currentProduct.name,
+      currentProduct.branch_id,
+      currentQuantity,
+      newQuantity,
+      reason
+    );
+    
+    res.json({ 
+      message: 'Used quantity updated successfully',
+      old_quantity: currentQuantity,
+      new_quantity: newQuantity,
+      quantity_used: quantity_used
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get used quantities for a specific service product
+router.get('/getUsedQuantities/:id', async (req, res) => {
+  try {
+    let { pageSize = 10, page = 1, date_from = '', date_to = '' } = req.query;
+    page = parseInt(page);
+    pageSize = parseInt(pageSize);
+
+    let queryRef = admin.firestore().collection(USED_QUANTITIES_COLLECTION)
+      .where('item_id', '==', req.params.id)
+      .where('item_type', '==', 'services_product');
+
+    // Filter by date range if provided
+    if (date_from) {
+      queryRef = queryRef.where('date_created', '>=', date_from);
+    }
+    if (date_to) {
+      // Add one day to include the entire date_to day
+      const nextDay = new Date(date_to);
+      nextDay.setDate(nextDay.getDate() + 1);
+      queryRef = queryRef.where('date_created', '<', nextDay.toISOString());
+    }
+
+    // Pagination
+    if (page > 1) {
+      const prevSnapshot = await queryRef.limit(pageSize * (page - 1)).get();
+      const docs = prevSnapshot.docs;
+      if (docs.length > 0) {
+        const lastVisible = docs[docs.length - 1];
+        queryRef = queryRef.startAfter(lastVisible);
+      }
+    }
+    queryRef = queryRef.limit(pageSize);
+
+    const snapshot = await queryRef.get();
+    const usedQuantities = snapshot.docs.map(doc => doc.data());
+
+    // Count total
+    let countQuery = admin.firestore().collection(USED_QUANTITIES_COLLECTION)
+      .where('item_id', '==', req.params.id)
+      .where('item_type', '==', 'services_product');
+    
+    // Apply same date filtering to count query
+    if (date_from) {
+      countQuery = countQuery.where('date_created', '>=', date_from);
+    }
+    if (date_to) {
+      const nextDay = new Date(date_to);
+      nextDay.setDate(nextDay.getDate() + 1);
+      countQuery = countQuery.where('date_created', '<', nextDay.toISOString());
+    }
+    
+    const countSnapshot = await countQuery.count().get();
+    const totalCount = countSnapshot.data().count;
+    const totalPages = Math.ceil(totalCount / pageSize);
+
+    res.status(200).json({ 
+      data: usedQuantities, 
+      page, 
+      totalPages, 
+      totalCount 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+async function getCategoryId(categoryName, branch_id) {
+  const categoryRef = admin.firestore().collection('categories');
+  const categorySnapshot = await categoryRef.where('name', '==', categoryName).where('branch_id', '==', branch_id).get();
+  if(categorySnapshot.empty){
+    return null;
+  }
+  return categorySnapshot.docs[0].id;
+}
 module.exports = router; 

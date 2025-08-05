@@ -46,11 +46,58 @@ router.post('/insertBranch', async (req, res) => {
       date_created,
       date_updated: date_created,
     };
+    
+    // Create the branch
     await firestore.collection(BRANCHES_COLLECTION).doc(id).set(branchData);
-    return res.status(200).json({data:branchData})
+    
+    // Create default categories for the branch
+    const defaultCategories = [
+      'Hair Care',
+      'Add Ons', 
+      'Styling & Make Up',
+      'Hand & Foot Care'
+    ];
+    
+    const categoryPromises = defaultCategories.map(categoryName => {
+      const categoryId = uuidv4();
+      const categoryData = {
+        id: categoryId,
+        name: categoryName,
+        branch_id: id,
+        date_created,
+        doc_type: 'CATEGORY'
+      };
+      return firestore.collection('categories').doc(categoryId).set(categoryData);
+    });
+    
+    // Create default payment methods for the branch
+    const defaultPaymentMethods = [
+      'Cash',
+      'Gcash',
+      'Paymaya'
+    ];
+    
+    const paymentMethodPromises = defaultPaymentMethods.map(paymentMethodName => {
+      const paymentMethodId = uuidv4();
+      const paymentMethodData = {
+        id: paymentMethodId,
+        name: paymentMethodName,
+        branch_id: id,
+        date_created,
+        doc_type: 'PAYMENT_METHOD'
+      };
+      return firestore.collection('payment_methods').doc(paymentMethodId).set(paymentMethodData);
+    });
+    
+    // Wait for all categories and payment methods to be created
+    await Promise.all([...categoryPromises, ...paymentMethodPromises]);
+    
+    return res.status(200).json({
+      data: branchData,
+      message: 'Branch created successfully with default categories and payment methods'
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
-    
     throw error;
   }
 });

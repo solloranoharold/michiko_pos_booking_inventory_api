@@ -532,14 +532,12 @@ router.post('/uploadServices', upload, async (req, res) => {
           const serviceId = uuidv4();
           const dateCreated = new Date().toISOString();
           
-          // Format category: lowercase and replace spaces with hyphens
-          const formattedCategory = row.category.trim().toLowerCase().replace(/\s+/g, '-');
           
           const serviceData = {
             id: serviceId,
             name: row.name.trim(),
             description: row.description.trim(),
-            category: formattedCategory,
+            category: await getCategoryId(row.category, branch_id),
             price: price,
             status: row.status || 'active',
             branch_id: branch_id,
@@ -600,5 +598,14 @@ router.post('/uploadServices', upload, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+async function getCategoryId(categoryName, branch_id) {
+  const categoryRef = admin.firestore().collection('categories');
+  const categorySnapshot = await categoryRef.where('name', '==', categoryName).where('branch_id', '==', branch_id).get();
+  if(categorySnapshot.empty){
+    return null;
+  }
+  return categorySnapshot.docs[0].id;
+}
 
 module.exports = router;

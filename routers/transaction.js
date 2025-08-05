@@ -32,8 +32,9 @@ async function getClientNameById(clientId) {
   const clientDoc = await firestore.collection('clients').doc(clientId).get();
   if (clientDoc.exists) {
     const clientData = clientDoc.data();
-    return clientData.fullname || 'Unknown Client';
+    return clientData.fullname || clientData.email;
   }
+  console.log('wala clienmt')
   return 'Unknown Client';
 }
 async function getBranchNameById(branchId) {
@@ -95,13 +96,17 @@ router.post('/createTransaction', async (req, res) => {
     const {
       client_id,
       branch_id,
-      accounts, // Array of {account_email, commission_rate (optional, defaults to 0.10)}
+      accounts, // Array of {account_email, commission_rate, commissionAmount}
       items, // Array of {item_id, quantity, price, type: 'service'|'services_product'|'otc_product'}
       payment_method,
-      payment_status = 'pending',
+      payment_status = 'paid',
+      additionals=[],
       notes = '',
       reference_no = '',
-      discount = 0 // Discount amount (defaults to 0)
+      discount = 0, // Discount amount (defaults to 0)
+      total_commission = 0, // Total commission amount (optional)
+      net_amount = 0, // Net amount after commissions (optional)
+      total_amount = 0 // Total amount before commissions (optional)
     } = req.body;
 
     if (!client_id || !branch_id || !items || items.length === 0) {
@@ -148,6 +153,17 @@ router.post('/createTransaction', async (req, res) => {
     const processedItems = [];
     const inventoryUpdates = [];
 
+    // Process additional amounts if provided
+    let additionalTotal = 0;
+    if (additionals && Array.isArray(additionals) && additionals.length > 0) {
+      additionalTotal = additionals.reduce((sum, additional) => {
+        if (additional.amount && typeof additional.amount === 'number' && additional.amount >= 0) {
+          return sum + additional.amount;
+        }
+        return sum;
+      }, 0);
+    }
+
     for (const item of items) {
       // Validate required fields for each item
       if (!item.item_id || !item.type) {
@@ -175,7 +191,6 @@ router.post('/createTransaction', async (req, res) => {
 
 
       let itemTotal=0;
-      console.log(item )
       // Calculate itemTotal based on type
       if (item.type === 'service') {
         // For services, use price directly (no quantity multiplication)
@@ -203,12 +218,14 @@ router.post('/createTransaction', async (req, res) => {
         const itemDoc = await firestore.collection('services_products').doc(item.item_id).get();
         if (itemDoc.exists) {
           const itemData = itemDoc.data();
-          let new_quantity = parseFloat(itemData.quantity) - parseFloat(item.quantity);
+          let new_total_value = parseFloat(itemData.total_value) - parseFloat(item.quantity);
+          let new_quantity = parseFloat(new_total_value) / parseFloat(itemData.unit_value);
           inventoryUpdates.push({
             collection: 'services_products',
             docId: item.item_id,
             updates: {
-              quantity: new_quantity < 0 ? 0 : new_quantity,
+              quantity: isNaN(new_quantity) ? 0 : new_quantity,
+              total_value: new_total_value,
               date_updated: getCurrentDate()
             }
           });
@@ -221,15 +238,15 @@ router.post('/createTransaction', async (req, res) => {
           used_unit_value: item.quantity
         });
       } else if (item.type === 'otc_product') {
-        let new_quantity=0
         const itemDoc = await firestore.collection('otcProducts').doc(item.item_id).get();
-        new_quantity = parseInt(itemDoc.quantity) - parseInt(item.quantity);
         if (itemDoc.exists) {
+          const itemData = itemDoc.data();
+          const new_quantity = parseInt(itemData.quantity) - parseInt(item.quantity);
           inventoryUpdates.push({
             collection: 'otcProducts',
             docId: item.item_id,
             updates: {
-              quantity: new_quantity<0?0:new_quantity,
+              quantity: isNaN(new_quantity) ? 0 : new_quantity,
               date_updated: getCurrentDate()
             }
           });
@@ -249,7 +266,7 @@ router.post('/createTransaction', async (req, res) => {
       }
     }
 
-    const subtotalAmount = parseFloat(subtotal.toFixed(2));
+    const subtotalAmount = parseFloat((subtotal + additionalTotal).toFixed(2));
     
     // Validate discount doesn't exceed subtotal
     if (discount !== undefined && discount !== null && discount > subtotalAmount) {
@@ -262,44 +279,48 @@ router.post('/createTransaction', async (req, res) => {
     const discountAmount = parseFloat(discount || 0);
     const total = parseFloat((subtotalAmount - discountAmount).toFixed(2));
 
-    // Calculate commissions for each account (optional)
-    let accountCommissions=[]
-    let totalCommissionAmount = 0;
-    if(accountsArray.length > 0){
-     accountCommissions = accountsArray.map(account => {
-      // Validate that account_email exists
-      if (!account.account_email) {
-        throw new Error('Account email is required for each account in the accounts array');
-      }
-      
-      const accountData = {
-        account_email: account.account_email
-      };
-      
-      // Only add commission data if commission_rate is provided
-      if (account.commission_rate !== undefined && account.commission_rate !== null) {
-        const commissionRate = account.commission_rate;
-        const commissionAmount = calculateCommission(total, commissionRate);
-        accountData.commission_rate = commissionRate;
-        accountData.commission_amount = commissionAmount;
-        totalCommissionAmount += commissionAmount;
-      }
-      
-      return accountData;
-    });
+    // Process commissions for each account
+    let accountCommissions = [];
     
-    // Validate that total commission amount doesn't exceed transaction total
-    if (totalCommissionAmount > total) {
-      return res.status(400).json({
-        error: `Total commission amount (${totalCommissionAmount}) cannot exceed transaction total (${total}). Please adjust commission rates.`
+    if (accountsArray.length > 0) {
+      accountCommissions = accountsArray.map(account => {
+        // Validate that account_email exists
+        if (!account.account_email) {
+          throw new Error('Account email is required for each account in the accounts array');
+        }
+        
+        const accountData = {
+          account_email: account.account_email
+        };
+        
+        // Add commission_rate if provided
+        if (account.commission_rate !== undefined && account.commission_rate !== null) {
+          if (typeof account.commission_rate !== 'number' || account.commission_rate < 0) {
+            throw new Error(`Invalid commission_rate for account ${account.account_email}. Commission rate must be a non-negative number.`);
+          }
+          accountData.commission_rate = account.commission_rate;
+        }
+        
+        // Add commissionAmount if provided
+        if (account.commissionAmount !== undefined && account.commissionAmount !== null) {
+          if (typeof account.commissionAmount !== 'number' || account.commissionAmount < 0) {
+            throw new Error(`Invalid commissionAmount for account ${account.account_email}. Commission amount must be a non-negative number.`);
+          }
+          accountData.commission_amount = account.commissionAmount;
+        }
+        
+        return accountData;
       });
     }
-    }
+    
+    // Use provided amounts directly
+    const totalCommissionAmount = total_commission || 0;
+    const finalTotal = total_amount || total;
+    const finalNetSales = net_amount || (finalTotal - totalCommissionAmount);
 
-    // Calculate total sales with and without commissions
-    const total_sales_overall = parseFloat(total.toFixed(2));
-    // Ensure net_sales doesn't go negative - cap it at 0 if commissions exceed total
-    const net_sales = parseFloat(Math.max(0, total - totalCommissionAmount).toFixed(2));
+    // Use provided amounts directly
+    const total_sales_overall = parseFloat(finalTotal.toFixed(2));
+    const net_sales = parseFloat(finalNetSales.toFixed(2));
 
     const transactionData = {
       id: transactionId,
@@ -308,9 +329,10 @@ router.post('/createTransaction', async (req, res) => {
       branch_id,
       accounts: accountCommissions, // Store all accounts with their commissions
       items: processedItems,
+      additionals: additionals || [], // Store the additionals array
       subtotal: subtotalAmount,
       discount: discountAmount,
-      total,
+      total: finalTotal,
       total_sales_overall,
       net_sales,
       total_commission_amount: totalCommissionAmount,
@@ -393,23 +415,26 @@ router.put('/voidTransaction/:id', async (req, res) => {
       return res.status(400).json({ error: 'Transaction is already voided' });
     }
 
-    if(transactionData.payment_status === 'paid'){
-
- 
-
     // Prepare inventory restoration updates
     const inventoryRestoreUpdates = [];
     
     for (const item of transactionData.items) {
       if (item.type === 'services_product') {
-        inventoryRestoreUpdates.push({
-          collection: 'services_products',
-          docId: item.item_id,
-          updates: {
-            quantity: admin.firestore.FieldValue.increment(item.used_unit_value),
-            date_updated: getCurrentDate()
-          }
-        });
+        const itemDoc = await firestore.collection('services_products').doc(item.item_id).get();
+        if (itemDoc.exists) {
+          const itemData = itemDoc.data();
+          let new_total_value = parseFloat(itemData.total_value) + parseFloat(item.quantity);
+          let new_quantity = parseFloat(new_total_value) / parseFloat(itemData.unit_value);
+          inventoryRestoreUpdates.push({
+            collection: 'services_products',
+            docId: item.item_id,
+            updates: {
+              quantity: new_quantity < 0 ? 0 : new_quantity,
+              total_value: new_total_value,
+              date_updated: getCurrentDate()
+            }
+          });
+        }
       } else if (item.type === 'otc_product') {
         inventoryRestoreUpdates.push({
           collection: 'otcProducts',
@@ -441,10 +466,9 @@ router.put('/voidTransaction/:id', async (req, res) => {
     // Execute all operations in a single batch
     await batch.commit();
 
-
     // Remove commissions for voided transaction
     await removeCommissionsForTransaction(id);
-
+    
     // Remove used quantities for voided transaction
     await removeUsedQuantitiesForTransaction(id);
 
@@ -453,9 +477,6 @@ router.put('/voidTransaction/:id', async (req, res) => {
       transaction_id: id,
       void_reason
     });
-  }else{
-    res.status(400).json({ error: 'Transaction is already voided' });
-  }
   } catch (error) {
     console.error('Error voiding transaction:', error);
     res.status(500).json({ error: error.message });
@@ -831,6 +852,7 @@ async function trackUsedQuantities(transactionId, branchId, items, dateCreated) 
           quantity_used: item.quantity,
           unit_price: item.price,
           total_value: item.item_total,
+          change_type: 'decrease', // Transaction reduces inventory
           date_created: dateCreated,
           doc_type: 'USED_QUANTITIES'
         };
@@ -1594,13 +1616,15 @@ router.get('/used-quantities-export/:branchId', async (req, res) => {
           category: '',
           quantity: 0,
           quantity_used: 0,
+          quantity_added: 0,
           status: '',
           item_type: record.item_type
         };
       }
       
-      // Add quantity_used
+      // Add quantity_used and quantity_added
       aggregatedData[aggregationKey].quantity_used += record.quantity_used || 0;
+      aggregatedData[aggregationKey].quantity_added += record.quantity_added || 0;
     }
 
     // Fetch additional item details and organize by type
@@ -1661,6 +1685,7 @@ router.get('/used-quantities-export/:branchId', async (req, res) => {
         'Category': record.category,
         'Quantity': record.quantity,
         'Quantity Used': record.quantity_used,
+        'Quantity Added': record.quantity_added > 0 ? record.quantity_added : 'N/A',
         'Status': record.status
       }));
     };
