@@ -205,6 +205,53 @@ router.delete('/deleteServiceProduct/:id', async (req, res) => {
   }
 });
 
+// Delete all service products by branch_id
+router.delete('/deleteAllServicesProductsByBranch/:branch_id', async (req, res) => {
+  try {
+    const { branch_id } = req.params;
+    
+    // Get all products for the specified branch
+    const productsSnapshot = await admin.firestore()
+      .collection(COLLECTION)
+      .where('branch_id', '==', branch_id)
+      .get();
+    
+    if (productsSnapshot.empty) {
+      return res.status(404).json({ 
+        message: 'No service products found for this branch',
+        deletedCount: 0
+      });
+    }
+    
+    // Delete all products in batches (Firestore batch operations are limited to 500 operations)
+    const batchSize = 500;
+    const products = productsSnapshot.docs;
+    let totalDeleted = 0;
+    
+    for (let i = 0; i < products.length; i += batchSize) {
+      const batch = admin.firestore().batch();
+      const batchProducts = products.slice(i, i + batchSize);
+      
+      batchProducts.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      
+      await batch.commit();
+      totalDeleted += batchProducts.length;
+    }
+    
+    res.json({ 
+      message: `Successfully deleted ${totalDeleted} service products from branch ${branch_id}`,
+      deletedCount: totalDeleted,
+      branch_id: branch_id
+    });
+    
+  } catch (error) {
+    console.error('Error deleting service products by branch:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Configure multer for file uploads (memory storage)
 const upload = multer({ 
   storage: multer.memoryStorage(),

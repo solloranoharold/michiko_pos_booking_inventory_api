@@ -54,15 +54,19 @@ router.get('/', (req, res) => {
 router.post('/insertProduct', async (req, res) => {
     console.log(req.body);
   try {
-    const { name, price, quantity, min_quantity, branch_id, status, brand } = req.body;
+    const { name, price, retail_price, quantity, min_quantity, branch_id, status, brand } = req.body;
     // Validate required fields
-    if (!name || !price || !quantity || !branch_id || !min_quantity || !brand) {
-      return res.status(400).json({ error: 'Name, price, min_quantity, quantity, branch_id, and brand are required' });
+    if (!name || !price || !retail_price || !quantity || !branch_id || !min_quantity || !brand) {
+      return res.status(400).json({ error: 'Name, price, retail_price, min_quantity, quantity, branch_id, and brand are required' });
     }
 
     // Validate data types
     if (typeof price !== 'number' || price <= 0) {
       return res.status(400).json({ error: 'Price must be a positive number' });
+    }
+    
+    if (typeof retail_price !== 'number' || retail_price <= 0) {
+      return res.status(400).json({ error: 'Retail price must be a positive number' });
     }
     
     if (typeof min_quantity !== 'number' || min_quantity < 0) {
@@ -74,7 +78,7 @@ router.post('/insertProduct', async (req, res) => {
 
     const id = uuidv4();
     const date_created = new Date().toISOString();
-    const data = { id, name, price, quantity, branch_id, date_created, min_quantity, status, brand };
+    const data = { id, name, price, retail_price, quantity, branch_id, date_created, min_quantity, status, brand };
     await admin.firestore().collection(COLLECTION).doc(id).set(data);
     res.status(201).json({ message: 'OTC product created', id });
   } catch (error) {
@@ -190,7 +194,7 @@ router.get('/getProduct/:id', async (req, res) => {
 // Update an OTC product by ID
 router.put('/updateProduct/:id', async (req, res) => {
   try {
-    const { name, price, quantity, branch_id, status, min_quantity, brand } = req.body;
+    const { name, price, retail_price, quantity, branch_id, status, min_quantity, brand } = req.body;
     
     // Get the current product data to compare quantities
     const currentProductDoc = await admin.firestore().collection(COLLECTION).doc(req.params.id).get();
@@ -202,7 +206,7 @@ router.put('/updateProduct/:id', async (req, res) => {
     const oldQuantity = currentProduct.quantity || 0;
     const newQuantity = quantity !== undefined ? quantity : oldQuantity;
     
-    const updateData = { name, price, quantity, branch_id, status, min_quantity, brand };
+    const updateData = { name, price, retail_price, quantity, branch_id, status, min_quantity, brand };
     // Remove undefined fields
     Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
     
@@ -233,6 +237,57 @@ router.delete('/deleteProduct/:id', async (req, res) => {
     await admin.firestore().collection(COLLECTION).doc(req.params.id).delete();
     res.json({ message: 'OTC product deleted' });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete all OTC products by branch ID
+router.delete('/deleteAllProductsByBranch/:branch_id', async (req, res) => {
+  try {
+    const { branch_id } = req.params;
+    
+    if (!branch_id) {
+      return res.status(400).json({ error: 'Branch ID is required' });
+    }
+
+    // Get all products for the specified branch
+    const snapshot = await admin.firestore()
+      .collection(COLLECTION)
+      .where('branch_id', '==', branch_id)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(404).json({ 
+        message: 'No OTC products found for this branch',
+        deleted_count: 0
+      });
+    }
+
+    // Delete all products in batches (Firestore batch limit is 500)
+    const batchSize = 500;
+    const products = snapshot.docs;
+    let deletedCount = 0;
+
+    for (let i = 0; i < products.length; i += batchSize) {
+      const batch = admin.firestore().batch();
+      const batchDocs = products.slice(i, i + batchSize);
+      
+      batchDocs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      
+      await batch.commit();
+      deletedCount += batchDocs.length;
+    }
+
+    res.json({ 
+      message: `Successfully deleted ${deletedCount} OTC products from branch ${branch_id}`,
+      deleted_count: deletedCount,
+      branch_id: branch_id
+    });
+
+  } catch (error) {
+    console.error('Error deleting products by branch:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -465,7 +520,7 @@ router.post('/uploadProducts', upload.single('file'), async (req, res) => {
     }
 
     // Validate required columns
-    const requiredColumns = ['name', 'price', 'quantity', 'min_quantity', 'brand'];
+    const requiredColumns = ['name', 'price', 'retail_price', 'quantity', 'min_quantity', 'brand'];
     const firstRow = products[0];
     const missingColumns = requiredColumns.filter(col => !(col in firstRow));
     
@@ -511,7 +566,7 @@ router.post('/uploadProducts', upload.single('file'), async (req, res) => {
 
         try {
           // Validate required fields
-          if (!row.name || !row.price || !row.quantity || !row.min_quantity || !row.brand) {
+          if (!row.name || !row.price || !row.retail_price || !row.quantity || !row.min_quantity || !row.brand) {
             return {
               row: rowNumber,
               status: 'error',
@@ -526,6 +581,16 @@ router.post('/uploadProducts', upload.single('file'), async (req, res) => {
               row: rowNumber,
               status: 'error',
               message: 'Invalid price - must be a positive number'
+            };
+          }
+
+          // Validate retail_price
+          const retail_price = parseFloat(row.retail_price);
+          if (isNaN(retail_price) || retail_price <= 0) {
+            return {
+              row: rowNumber,
+              status: 'error',
+              message: 'Invalid retail_price - must be a positive number'
             };
           }
 
@@ -567,6 +632,7 @@ router.post('/uploadProducts', upload.single('file'), async (req, res) => {
             id: productId,
             name: row.name.trim(),
             price: price,
+            retail_price: retail_price,
             quantity: quantity,
             min_quantity: min_quantity,
             brand: row.brand.trim(),

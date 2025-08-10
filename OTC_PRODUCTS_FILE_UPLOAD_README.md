@@ -32,7 +32,7 @@ Uploads an Excel or CSV file to bulk insert OTC products.
 **File Requirements:**
 - Supported formats: `.xlsx`, `.xls`, `.csv`
 - Maximum file size: 5MB
-- Required columns: `name`, `price`, `quantity`, `min_quantity`, `category`, `brand`
+- Required columns: `name`, `price`, `retail_price`, `quantity`, `min_quantity`, `brand`
 - Optional columns: `status` (defaults to 'active')
 
 **Response:**
@@ -69,9 +69,9 @@ Uploads an Excel or CSV file to bulk insert OTC products.
 
 ### CSV Format
 ```csv
-name,price,quantity,min_quantity,category,brand,status
-Shampoo,15.50,100,10,Personal Care,Head & Shoulders,active
-Conditioner,18.75,80,8,Personal Care,Pantene,active
+name,price,retail_price,quantity,min_quantity,brand,status
+Shampoo,15.50,18.00,100,10,Head & Shoulders,active
+Conditioner,18.75,22.00,80,8,Pantene,active
 ```
 
 ### Excel Format
@@ -79,12 +79,13 @@ The Excel file should have the same column structure as the CSV format.
 
 ## Validation Rules
 
-1. **Required Fields:** All products must have `name`, `price`, `quantity`, `min_quantity`, `category`, and `brand`
+1. **Required Fields:** All products must have `name`, `price`, `retail_price`, `quantity`, `min_quantity`, and `brand`
 2. **Price Validation:** Price must be a positive number
-3. **Quantity Validation:** Quantity must be a non-negative number
-4. **Min Quantity Validation:** Min quantity must be a non-negative number
-5. **Duplicate Check:** Products with the same name in the same branch will be skipped
-6. **Status:** If not provided, defaults to 'active'
+3. **Retail Price Validation:** Retail price must be a positive number
+4. **Quantity Validation:** Quantity must be a non-negative number
+5. **Min Quantity Validation:** Min quantity must be a non-negative number
+6. **Duplicate Check:** Products with the same name in the same branch will be skipped
+7. **Status:** If not provided, defaults to 'active'
 
 ## Error Handling
 
@@ -155,10 +156,10 @@ fetch('/otcProducts/uploadProducts', {
 ## Field Descriptions
 
 - **name**: Product name (string, required)
-- **price**: Product price (number, required, must be positive)
+- **price**: Product cost price (number, required, must be positive)
+- **retail_price**: Product retail/selling price (number, required, must be positive)
 - **quantity**: Current stock quantity (number, required, must be non-negative)
 - **min_quantity**: Minimum stock level for alerts (number, required, must be non-negative)
-- **category**: Product category (string, required)
 - **brand**: Product brand (string, required)
 - **status**: Product status (string, optional, defaults to 'active')
 

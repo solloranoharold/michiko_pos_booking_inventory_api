@@ -1171,7 +1171,7 @@ router.get('/used-quantities/:branchId', async (req, res) => {
           itemData = await getOtcProductDataById(record.item_id);
           index = arrData.findIndex(item => item.id === record.item_id);
         }
-        record.category = itemData.category;
+        record.category = itemData?.category || null;
         record.branch_name = await getBranchNameById(record.branch_id);
         if(index === -1){
           arrData.push({
@@ -1179,7 +1179,7 @@ router.get('/used-quantities/:branchId', async (req, res) => {
             name: itemData.name,
             stocks: itemData.quantity,
             min_quantity: itemData.min_quantity,
-            category: itemData.category,
+            category: itemData?.category || null,
             item_type: record.item_type,
             branch_name: await getBranchNameById(record.branch_id),
             usages:[ record ],
