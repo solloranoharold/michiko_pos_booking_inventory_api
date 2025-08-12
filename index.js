@@ -19,10 +19,63 @@ const requireAuthHeader = require('./authMiddleware');
 const verifyToken = require('./verifyToken');
 
 const app = express();
-app.use(cors());
-app.use(bodyParser.json());
 
-app.use('/ftp', express.static('images'), serveIndex('images', {'icons': true, 'view': 'details'}))
+// Configure CORS with specific options for file uploads
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Disposition']
+}));
+
+// Configure body-parser with proper limits and error handling
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
+
+// Handle multipart form data more gracefully
+app.use((req, res, next) => {
+  // Skip body parsing for multipart forms (let multer handle it)
+  if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
+    return next();
+  }
+  next();
+});
+
+// app.use('/ftp', express.static('images'), serveIndex('images', {'icons': true, 'view': 'details'}))
+
+// Serve static images
+app.use('/images', express.static(path.join(__dirname, 'images')));
+
+// Global error handler for multipart form errors
+app.use((error, req, res, next) => {
+  console.error('Global error handler:', error);
+  
+  if (error.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: 'File too large' });
+  }
+  if (error.message && error.message.includes('Unexpected end of form')) {
+    return res.status(400).json({ error: 'Invalid form data or incomplete upload' });
+  }
+  if (error.code === 'LIMIT_UNEXPECTED_FILE') {
+    return res.status(400).json({ error: 'Unexpected file field in form' });
+  }
+  if (error.code === 'LIMIT_FILE_COUNT') {
+    return res.status(400).json({ error: 'Too many files uploaded' });
+  }
+  if (error.code === 'LIMIT_FIELD_KEY') {
+    return res.status(400).json({ error: 'Field name too long' });
+  }
+  if (error.code === 'LIMIT_FIELD_VALUE') {
+    return res.status(400).json({ error: 'Field value too long' });
+  }
+  if (error.code === 'LIMIT_FIELD_COUNT') {
+    return res.status(400).json({ error: 'Too many fields in form' });
+  }
+  
+  // Generic error response
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 app.get('/', (req, res) => {
   res.send('Hello World');
