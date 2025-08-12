@@ -42,10 +42,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// app.use('/ftp', express.static('images'), serveIndex('images', {'icons': true, 'view': 'details'}))
+app.use('/ftp', express.static('images'), serveIndex('images', {'icons': true, 'view': 'details'}))
 
 // Serve static images
-app.use('/images', express.static(path.join(__dirname, 'images')));
+// app.use('/images', express.static(path.join(__dirname, 'images')));
 
 // Global error handler for multipart form errors
 app.use((error, req, res, next) => {
