@@ -579,11 +579,17 @@ router.get('/getAllTransactions', async (req, res) => {
     // Count total paid transactions
     let statusPaidQuery = firestore.collection(TRANSACTIONS_COLLECTION);
     statusPaidQuery = statusPaidQuery.where('payment_status', '==', 'paid');
+    if(branch_id){
+      statusPaidQuery = statusPaidQuery.where('branch_id', '==', branch_id);
+    }
     const statusPaidSnapshot = await statusPaidQuery.count().get();
     const totalCountPaid = statusPaidSnapshot.data().count;
     // Count total voided transactions
     let statusVoidQuery = firestore.collection(TRANSACTIONS_COLLECTION);
     statusVoidQuery = statusVoidQuery.where('payment_status', '==', 'void');
+    if(branch_id){
+      statusVoidQuery = statusVoidQuery.where('branch_id', '==', branch_id);
+    }
     const statusVoidSnapshot = await statusVoidQuery.count().get();
     const totalCountVoid = statusVoidSnapshot.data().count;
 
