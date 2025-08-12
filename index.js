@@ -1,6 +1,9 @@
 const express = require('express');
+var serveIndex = require('serve-index')
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 const clientsRouter = require('./routers/clients');
 const accountsRouter = require('./routers/account');
 const branchesRouter = require('./routers/branches');
@@ -19,14 +22,17 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+app.use('/ftp', express.static('images'), serveIndex('images', {'icons': true, 'view': 'details'}))
+
 app.get('/', (req, res) => {
   res.send('Hello World');
 });
 
+
 // Add verifyToken endpoint
 app.post('/api/verifyToken', verifyToken);
 // Apply Authorization header middleware globally
-app.use(requireAuthHeader);
+app.use('/api',requireAuthHeader);
 
 // Use the clients router for all /clients routes
 app.use('/api/clients', clientsRouter);
@@ -45,4 +51,4 @@ app.use('/api/payment-methods', paymentMethodsRouter);
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
-}); 
+});

@@ -5,6 +5,7 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 const csv = require('csv-parser');
 const path = require('path');
+const fs = require('fs');
 
 const router = express.Router();
 const firestore = admin.firestore();
@@ -41,7 +42,7 @@ router.get('/', (req, res) => {
 // Create a new client (email as primary key)
 router.post('/insertClient', async (req, res) => {
   try {
-    const { fullname, contactNo, address, email, status, updated_by } = req.body;
+    const { fullname, contactNo, address, email, status, updated_by, notes, social_media } = req.body;
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
     }
@@ -71,6 +72,8 @@ router.post('/insertClient', async (req, res) => {
       dateUpdated, 
       status, 
       updated_by, 
+      notes: notes || [],
+      social_media: social_media || {},
       doc_type: 'CLIENTS' 
     };
     
@@ -167,7 +170,7 @@ router.get('/getEmailClient/:email', async (req, res) => {
 // Update a client by email
 router.put('/updateClient/:email', async (req, res) => {
   try {
-    const { fullname, contactNo, address, status, updated_by } = req.body;
+    const { fullname, contactNo, address, status, updated_by, notes, social_media } = req.body;
     if (!updated_by) {
       return res.status(400).json({ error: 'Updated by field is required' });
     }
@@ -179,7 +182,17 @@ router.put('/updateClient/:email', async (req, res) => {
     // Preserve doc_type and dateCreated
     const prevData = clientSnap.data();
     const dateUpdated = new Date().toISOString();
-    const updateData = { fullname, contactNo, address, status, dateUpdated, updated_by, doc_type: 'CLIENTS' };
+    const updateData = { 
+      fullname, 
+      contactNo, 
+      address, 
+      status, 
+      dateUpdated, 
+      updated_by, 
+      notes: notes !== undefined ? notes : prevData.notes,
+      social_media: social_media !== undefined ? social_media : prevData.social_media,
+      doc_type: 'CLIENTS' 
+    };
     await clientRef.update(updateData);
     res.json({ id: req.params.email, ...prevData, ...updateData });
   } catch (error) {
@@ -224,6 +237,29 @@ const upload = multer({
   }
 });
 
+// Configure multer for image uploads
+const imageUpload = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = [
+      'image/jpeg',
+      'image/jpg',
+      'image/png',
+      'image/gif',
+      'image/webp'
+    ];
+    
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files (JPEG, PNG, GIF, WebP) are allowed'), false);
+    }
+  },
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit per image
+  }
+});
+
 // Download clients template
 router.get('/downloadTemplate', (req, res) => {
   try {
@@ -262,35 +298,57 @@ router.get('/downloadTemplate', (req, res) => {
 // Download Excel template for clients
 router.get('/downloadExcelTemplate', (req, res) => {
   try {
-    const fs = require('fs');
-    const csvTemplatePath = path.join(__dirname, '../sample_clients_template.csv');
-    
-    if (!fs.existsSync(csvTemplatePath)) {
-      return res.status(404).json({ error: 'Template file not found' });
-    }
-
-    // Read CSV template
-    const csvContent = fs.readFileSync(csvTemplatePath, 'utf8');
-    
-    // Parse CSV to get headers and sample data
-    const lines = csvContent.trim().split('\n');
-    const headers = lines[0].split(',');
-    const sampleData = lines.slice(1).map(line => {
-      const values = line.split(',');
-      const row = {};
-      headers.forEach((header, index) => {
-        row[header.trim()] = values[index] ? values[index].trim() : '';
-      });
-      return row;
-    });
+    // Define the template headers and sample data
+    const headers = ['fullname', 'contactNo', 'address', 'email', 'status'];
+    const sampleData = [
+      {
+        fullname: 'John Doe',
+        contactNo: '+1234567890',
+        address: '123 Main St, City, State 12345',
+        email: 'john.doe@example.com',
+        status: 'active'
+      },
+      {
+        fullname: 'Jane Smith',
+        contactNo: '+0987654321',
+        address: '456 Oak Ave, Town, State 67890',
+        email: 'jane.smith@example.com',
+        status: 'active'
+      }
+    ];
 
     // Create Excel workbook
     const workbook = xlsx.utils.book_new();
     const worksheet = xlsx.utils.json_to_sheet(sampleData, { header: headers });
     
     // Set column widths for better readability
-    const colWidths = headers.map(header => ({ wch: Math.max(header.length, 15) }));
+    const colWidths = [
+      { wch: 20 }, // fullname
+      { wch: 15 }, // contactNo
+      { wch: 35 }, // address
+      { wch: 25 }, // email
+      { wch: 15 }  // status (increased width for dropdown)
+    ];
     worksheet['!cols'] = colWidths;
+
+    // Add data validation for status field (dropdown)
+    const statusOptions = ['active', 'inactive', 'pending', 'suspended'];
+    const statusRange = `E2:E${sampleData.length + 1}`; // Column E (status column)
+    
+    // Add data validation to the worksheet
+    worksheet['!dataValidation'] = {
+      [statusRange]: {
+        type: 'list',
+        formula1: `"${statusOptions.join(',')}"`,
+        allowBlank: false,
+        showErrorMessage: true,
+        errorTitle: 'Invalid Status',
+        error: 'Please select a valid status from the dropdown list.',
+        showInputMessage: true,
+        inputTitle: 'Status Selection',
+        input: 'Select a status from the dropdown list.'
+      }
+    };
 
     // Add worksheet to workbook
     xlsx.utils.book_append_sheet(workbook, worksheet, 'Clients Template');
@@ -511,5 +569,377 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// Update client notes with image uploads
+router.post('/updateClientNotes/:clientId', imageUpload.array('images', 10), async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { note, updated_by ,branch_id } = req.body;
+    
+    // Validate required fields
+    if (!note  || !updated_by) {
+      return res.status(400).json({ 
+        error: 'note, and updated_by are required' 
+      });
+    }
+    
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ 
+        error: 'At least one image is required' 
+      });
+    }
+
+    // Get client reference
+    const clientRef = firestore.collection(CLIENTS_COLLECTION).doc(clientId);
+    const clientSnap = await clientRef.get();
+    
+    if (!clientSnap.exists) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    // Generate date string for folder structure
+    const now = new Date();
+    const dateString = now.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+    
+    // Create local folder path
+    const fs = require('fs');
+    const localFolderPath = path.join(__dirname, '../images/client_notes', clientId, branch_id, dateString);
+    
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(localFolderPath)) {
+      fs.mkdirSync(localFolderPath, { recursive: true });
+    }
+    
+    // Save images locally
+    const imagePaths = [];
+    
+    for (let i = 0; i < req.files.length; i++) {
+      const file = req.files[i];
+      const fileName = `image${i + 1}_${Date.now()}_${Math.random().toString(36).substring(7)}${path.extname(file.originalname)}`;
+      const localFilePath = path.join(localFolderPath, fileName);
+      
+      try {
+        // Save file to local directory
+        fs.writeFileSync(localFilePath, file.buffer);
+        
+        // Store relative path for database
+        const relativePath = `client_notes/${clientId}/${branch_id}/${dateString}/${fileName}`;
+        imagePaths.push(relativePath);
+        
+        console.log(`Image saved locally: ${localFilePath}`);
+      } catch (saveError) {
+        console.error(`Error saving image ${fileName}:`, saveError);
+        return res.status(500).json({ 
+          error: `Failed to save image ${fileName}: ${saveError.message}` 
+        });
+      }
+    }
+
+    // Get current client data
+    const currentData = clientSnap.data();
+    const currentNotes = currentData.notes || [];
+    
+    // Create new note entry
+    const newNote = {
+      img_path: imagePaths,
+      note: note.trim(),
+      created_at: now.toISOString(),
+      created_by: updated_by,
+      branch_id: branch_id
+    };
+    
+    // Add new note to existing notes array
+    const updatedNotes = [...currentNotes, newNote];
+    
+    // Update client document
+    const updateData = {
+      notes: updatedNotes,
+      dateUpdated: now.toISOString(),
+      updated_by: updated_by
+    };
+    
+    await clientRef.update(updateData);
+    
+    res.status(200).json({
+      message: 'Notes updated successfully',
+      note: newNote,
+      totalNotes: updatedNotes.length
+    });
+
+  } catch (error) {
+    console.error('Error updating client notes:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
+
+
+// Update specific note from client notes array by index
+router.put('/updateClientNote/:clientId/:noteIndex', imageUpload.array('images', 10), async (req, res) => {
+  try {
+    const { clientId, noteIndex } = req.params;
+    const { note, updated_by, branch_id, existing_images } = req.body;
+    
+    // Validate required fields
+    if (!note || !updated_by || !branch_id) {
+      return res.status(400).json({ 
+        error: 'note, updated_by, and branch_id are required' 
+      });
+    }
+
+    // Parse existing_images if provided
+    let existingImagesToKeep = [];
+    if (existing_images) {
+      try {
+        existingImagesToKeep = JSON.parse(existing_images).map(img => img.name);
+        if (!Array.isArray(existingImagesToKeep)) {
+          return res.status(400).json({ 
+            error: 'existing_images must be an array' 
+          });
+        }
+      } catch (parseError) {
+        return res.status(400).json({ 
+          error: 'Invalid existing_images format' 
+        });
+      }
+    }
+    
+    // Validate noteIndex is a number
+    const index = parseInt(noteIndex);
+    if (isNaN(index) || index < 0) {
+      return res.status(400).json({ 
+        error: 'noteIndex must be a valid non-negative number' 
+      });
+    }
+
+    // Get client reference
+    const clientRef = firestore.collection(CLIENTS_COLLECTION).doc(clientId);
+    const clientSnap = await clientRef.get();
+    
+    if (!clientSnap.exists) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    // Get current client data
+    const currentData = clientSnap.data();
+    const currentNotes = currentData.notes || [];
+    
+    // Check if note index exists
+    if (index >= currentNotes.length) {
+      return res.status(404).json({ 
+        error: `Note at index ${index} not found. Total notes: ${currentNotes.length}` 
+      });
+    }
+    
+    // Get the note to be updated
+    const noteToUpdate = currentNotes[index];
+    const finalImagePaths = [];
+    
+    // Handle existing images from the note
+    if (noteToUpdate.img_path && Array.isArray(noteToUpdate.img_path)) {
+      const fs = require('fs');
+      const path = require('path');
+      
+      console.log(`Processing ${noteToUpdate.img_path.length} existing images, ${existingImagesToKeep.length} images to preserve`);
+      
+      for (const imagePath of noteToUpdate.img_path) {
+        // Check if this image should be kept (exists in existing_images)
+        if (existingImagesToKeep.includes(imagePath)) {
+          finalImagePaths.push(imagePath);
+          console.log(`Preserving existing image: ${imagePath}`);
+        } else {
+          // Delete the image file if it's not in the keep list
+          try {
+            const fullImagePath = path.join(__dirname, '../images', imagePath);
+            if (fs.existsSync(fullImagePath)) {
+              fs.unlinkSync(fullImagePath);
+              console.log(`Deleted old image file: ${fullImagePath}`);
+            }
+          } catch (deleteError) {
+            console.error(`Error deleting old image file ${imagePath}:`, deleteError);
+            // Continue with other files even if one fails
+          }
+        }
+      }
+    }
+    
+    // Handle new image uploads if provided
+    if (req.files && req.files.length > 0) {
+      // Generate date string for folder structure (use original note creation date)
+      const originalDate = new Date(noteToUpdate.created_at);
+      const dateString = originalDate.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+      
+      // Create local folder path (use new branch_id and original date)
+      const fs = require('fs');
+      const localFolderPath = path.join(__dirname, '../images/client_notes', clientId, branch_id, dateString);
+      
+      // Create directory if it doesn't exist
+      if (!fs.existsSync(localFolderPath)) {
+        fs.mkdirSync(localFolderPath, { recursive: true });
+      }
+      
+      // Save new images locally and add to final paths
+      for (let i = 0; i < req.files.length; i++) {
+        const file = req.files[i];
+        const fileName = `image${i + 1}_${Date.now()}_${Math.random().toString(36).substring(7)}${path.extname(file.originalname)}`;
+        const localFilePath = path.join(localFolderPath, fileName);
+        
+        try {
+          // Save file to local directory
+          fs.writeFileSync(localFilePath, file.buffer);
+          
+          // Store relative path for database
+          const relativePath = `client_notes/${clientId}/${branch_id}/${dateString}/${fileName}`;
+          finalImagePaths.push(relativePath);
+          
+          console.log(`New image saved locally: ${localFilePath}`);
+        } catch (saveError) {
+          console.error(`Error saving new image ${fileName}:`, saveError);
+          return res.status(500).json({ 
+            error: `Failed to save new image ${fileName}: ${saveError.message}` 
+          });
+        }
+      }
+    }
+    
+    console.log(`Final image paths: ${finalImagePaths.length} total (${finalImagePaths.join(', ')})`);
+    
+    // Create updated note entry
+    const updatedNote = {
+      ...noteToUpdate, // Keep all original fields
+      img_path: finalImagePaths,
+      note: note.trim(),
+      branch_id: branch_id, // Update with new branch_id
+      updated_at: new Date().toISOString(),
+      updated_by: updated_by
+    };
+    
+    // Update the note in the array
+    const updatedNotes = [...currentNotes];
+    updatedNotes[index] = updatedNote;
+    
+    // Update client document
+    const updateData = {
+      notes: updatedNotes,
+      dateUpdated: new Date().toISOString(),
+      updated_by: updated_by
+    };
+    
+    await clientRef.update(updateData);
+    
+    res.status(200).json({
+      message: 'Note updated successfully',
+      updatedNote: updatedNote,
+      totalNotes: updatedNotes.length
+    });
+
+  } catch (error) {
+    console.error('Error updating note:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete specific note from client notes array by index
+router.delete('/deleteClientNote/:clientId/:noteIndex', async (req, res) => {
+  try {
+    const { clientId, noteIndex } = req.params;
+    
+    // Validate noteIndex is a number
+    const index = parseInt(noteIndex);
+    if (isNaN(index) || index < 0) {
+      return res.status(400).json({ 
+        error: 'noteIndex must be a valid non-negative number' 
+      });
+    }
+
+    // Get client reference
+    const clientRef = firestore.collection(CLIENTS_COLLECTION).doc(clientId);
+    const clientSnap = await clientRef.get();
+    
+    if (!clientSnap.exists) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    // Get current client data
+    const currentData = clientSnap.data();
+    const currentNotes = currentData.notes || [];
+    
+    // Check if note index exists
+    if (index >= currentNotes.length) {
+      return res.status(404).json({ 
+        error: `Note at index ${index} not found. Total notes: ${currentNotes.length}` 
+      });
+    }
+    
+    // Get the note to be deleted for cleanup
+    const noteToDelete = currentNotes[index];
+    
+    // Delete associated image files from local storage
+    if (noteToDelete.img_path && Array.isArray(noteToDelete.img_path)) {
+      const fs = require('fs');
+      const path = require('path');
+      
+      for (const imagePath of noteToDelete.img_path) {
+        try {
+          // Construct full local file path
+          const fullImagePath = path.join(__dirname, '../images', imagePath);
+          
+          // Check if file exists before attempting to delete
+          if (fs.existsSync(fullImagePath)) {
+            fs.unlinkSync(fullImagePath);
+            console.log(`Deleted image file: ${fullImagePath}`);
+          } else {
+            console.log(`Image file not found: ${fullImagePath}`);
+          }
+        } catch (deleteError) {
+          console.error(`Error deleting image file ${imagePath}:`, deleteError);
+          // Continue with other files even if one fails
+        }
+      }
+      
+      // Try to remove empty directories (optional cleanup)
+      try {
+        if (noteToDelete.branch_id && noteToDelete.created_at) {
+          const dateString = noteToDelete.created_at.split('T')[0];
+          const dirPath = path.join(__dirname, '../images/client_notes', clientId, noteToDelete.branch_id, dateString);
+          
+          // Check if directory is empty and remove it
+          if (fs.existsSync(dirPath) && fs.readdirSync(dirPath).length === 0) {
+            fs.rmdirSync(dirPath);
+            console.log(`Removed empty directory: ${dirPath}`);
+          }
+        }
+      } catch (dirError) {
+        console.error('Error cleaning up empty directories:', dirError);
+        // Directory cleanup is optional, don't fail the main operation
+      }
+    }
+    
+    // Remove the note from the array
+    const updatedNotes = currentNotes.filter((_, i) => i !== index);
+    
+    // Update client document
+    const updateData = {
+      notes: updatedNotes
+    };
+    
+    await clientRef.update(updateData);
+    
+    res.status(200).json({
+      message: 'Note deleted successfully',
+      deletedNote: noteToDelete,
+      totalNotes: updatedNotes.length
+    });
+
+  } catch (error) {
+    console.error('Error deleting note:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
 
 module.exports = router; 

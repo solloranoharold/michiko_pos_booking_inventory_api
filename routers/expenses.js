@@ -2,6 +2,7 @@ const express = require('express');
 const admin = require('../firebaseAdmin');
 const { v4: uuidv4 } = require('uuid');
 const moment = require('moment');
+const ExcelJS = require('exceljs');
 
 const router = express.Router();
 const firestore = admin.firestore();
@@ -125,6 +126,18 @@ router.get('/getAllExpenses', async (req, res) => {
         expenseData.branch_name = 'Unknown Branch';
       }
 
+      // Get category name if available
+      try {
+        const categoryDoc = await firestore.collection('categories').doc(expenseData.category).get();
+        if (categoryDoc.exists) {
+          expenseData.category_name = categoryDoc.data().name || 'Unknown Category';
+        } else {
+          expenseData.category_name = 'Unknown Category';
+        }
+      } catch (error) {
+        expenseData.category_name = 'Unknown Category';
+      }
+
       expenses.push(expenseData);
     }
 
@@ -171,6 +184,18 @@ router.get('/getExpense/:id', async (req, res) => {
       }
     } catch (error) {
       expenseData.branch_name = 'Unknown Branch';
+    }
+
+    // Get category name if available
+    try {
+      const categoryDoc = await firestore.collection('categories').doc(expenseData.category).get();
+      if (categoryDoc.exists) {
+        expenseData.category_name = categoryDoc.data().name || 'Unknown Category';
+      } else {
+        expenseData.category_name = 'Unknown Category';
+      }
+    } catch (error) {
+      expenseData.category_name = 'Unknown Category';
     }
 
     return res.status(200).json({ data: expenseData });
@@ -436,6 +461,133 @@ router.get('/getExpenseStats', async (req, res) => {
 
   } catch (error) {
     console.error('Error fetching expense statistics:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// DOWNLOAD - Download expenses as Excel file
+router.get('/downloadExpensesExcel', async (req, res) => {
+  try {
+    let { 
+      branch_id = '', 
+      search = '',
+      start_date = '',
+      end_date = ''
+    } = req.query;
+
+    let queryRef = firestore.collection(EXPENSES_COLLECTION);
+
+    // Apply filters
+    if (branch_id) {
+      queryRef = queryRef.where('branch_id', '==', branch_id);
+    }
+    if (search) {
+      queryRef = queryRef.where('name', '==', search);
+    }
+    if (start_date) {
+      const startDate = new Date(start_date);
+      queryRef = queryRef.where('date_created', '>=', startDate.toISOString());
+    }
+    if (end_date) {
+      const endDate = new Date(end_date);
+      endDate.setHours(23, 59, 59, 999);
+      queryRef = queryRef.where('date_created', '<=', endDate.toISOString());
+    }
+
+    // Get all expenses (no pagination for export)
+    const snapshot = await queryRef.get();
+    const expenses = [];
+
+    for (const doc of snapshot.docs) {
+      const expenseData = doc.data();
+      
+      // Get branch name if available
+      try {
+        const branchDoc = await firestore.collection('branches').doc(expenseData.branch_id).get();
+        if (branchDoc.exists) {
+          expenseData.branch_name = branchDoc.data().name || 'Unknown Branch';
+        } else {
+          expenseData.branch_name = 'Unknown Branch';
+        }
+      } catch (error) {
+        expenseData.branch_name = 'Unknown Branch';
+      }
+
+      // Get category name if available
+      try {
+        const categoryDoc = await firestore.collection('categories').doc(expenseData.category).get();
+        if (categoryDoc.exists) {
+          expenseData.category_name = categoryDoc.data().name || 'Unknown Category';
+        } else {
+          expenseData.category_name = 'Unknown Category';
+        }
+      } catch (error) {
+        expenseData.category_name = 'Unknown Category';
+      }
+
+      expenses.push(expenseData);
+    }
+
+    // Create Excel workbook and worksheet
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Expenses');
+
+    // Define columns
+    worksheet.columns = [
+      { header: 'ID', key: 'id', width: 36 },
+      { header: 'Branch Name', key: 'branch_name', width: 20 },
+      { header: 'Category ID', key: 'category', width: 15 },
+      { header: 'Category Name', key: 'category_name', width: 20 },
+      { header: 'Name', key: 'name', width: 30 },
+      { header: 'Amount', key: 'amount', width: 15 },
+      { header: 'Status', key: 'status', width: 12 },
+      { header: 'Date Created', key: 'date_created', width: 20 },
+      { header: 'Date Updated', key: 'date_updated', width: 20 }
+    ];
+
+    // Style the header row
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+
+    // Add data rows
+    expenses.forEach(expense => {
+      worksheet.addRow({
+        id: expense.id,
+        branch_name: expense.branch_name,
+        category: expense.category,
+        category_name: expense.category_name,
+        name: expense.name,
+        amount: expense.amount,
+        status: expense.status,
+        date_created: expense.date_created ? moment(expense.date_created).format('YYYY-MM-DD HH:mm:ss') : '',
+        date_updated: expense.date_updated ? moment(expense.date_updated).format('YYYY-MM-DD HH:mm:ss') : ''
+      });
+    });
+
+    // Format amount column as currency
+    worksheet.getColumn('amount').numFmt = '#,##0.00';
+
+    // Generate filename with timestamp
+    const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
+    const filename = `expenses_${timestamp}.xlsx`;
+
+    // Generate buffer
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    // Set response headers
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length);
+
+    // Send buffer as response
+    res.send(buffer);
+
+  } catch (error) {
+    console.error('Error downloading expenses Excel:', error);
     return res.status(500).json({ error: error.message });
   }
 });
