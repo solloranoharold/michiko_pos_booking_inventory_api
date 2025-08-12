@@ -6,6 +6,7 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 const csv = require('csv-parser');
 const path = require('path');
+const ExcelJS = require('exceljs');
 
 const COLLECTION = 'otcProducts';
 const USED_QUANTITIES_COLLECTION = 'used_quantities';
@@ -54,10 +55,10 @@ router.get('/', (req, res) => {
 router.post('/insertProduct', async (req, res) => {
     console.log(req.body);
   try {
-    const { name, price, retail_price, quantity, min_quantity, branch_id, status, brand } = req.body;
+    const { name, price, retail_price, quantity, min_quantity, branch_id, status, brand, category } = req.body;
     // Validate required fields
-    if (!name || !price || !retail_price || !quantity || !branch_id || !min_quantity || !brand) {
-      return res.status(400).json({ error: 'Name, price, retail_price, min_quantity, quantity, branch_id, and brand are required' });
+    if (!name || !price || !retail_price || !quantity || !branch_id || !min_quantity || !brand || !category) {
+      return res.status(400).json({ error: 'Name, price, retail_price, min_quantity, quantity, branch_id, brand, and category are required' });
     }
 
     // Validate data types
@@ -78,7 +79,7 @@ router.post('/insertProduct', async (req, res) => {
 
     const id = uuidv4();
     const date_created = new Date().toISOString();
-    const data = { id, name, price, retail_price, quantity, branch_id, date_created, min_quantity, status, brand };
+    const data = { id, name, price, retail_price, quantity, branch_id, date_created, min_quantity, status, brand, category };
     await admin.firestore().collection(COLLECTION).doc(id).set(data);
     res.status(201).json({ message: 'OTC product created', id });
   } catch (error) {
@@ -89,13 +90,13 @@ router.post('/insertProduct', async (req, res) => {
 // Get all OTC products
 router.get('/getAllProducts', async (req, res) => {
   try {
-    let { pageSize = 10, page = 1, search = '', branch_id = '' , min_quantity = null } = req.query;
+    let { pageSize = 10, page = 1, search = '', branch_id = '' , min_quantity = null, category = '' } = req.query;
     page = parseInt(page);
     pageSize = parseInt(pageSize);
     let searchField = 'name';
     let queryRef = admin.firestore().collection(COLLECTION);
 
-    // Apply all filters that are present (search, branch_id)
+    // Apply all filters that are present (search, branch_id, category)
     if (search) {
       queryRef = queryRef
         .where(searchField, '>=', search)
@@ -103,6 +104,9 @@ router.get('/getAllProducts', async (req, res) => {
     }
     if (branch_id) {
       queryRef = queryRef.where('branch_id', '==', branch_id);
+    }
+    if (category) {
+      queryRef = queryRef.where('category', '==', category);
     }
     console.log(min_quantity ,'min_quantity');
     if (min_quantity !== null && min_quantity !== undefined) {
@@ -135,7 +139,7 @@ router.get('/getAllProducts', async (req, res) => {
 
     // For total count, use a separate query without pagination
     let countQuery = admin.firestore().collection(COLLECTION);
-    // Apply all filters that are present (search, branch_id) in the same order as above
+    // Apply all filters that are present (search, branch_id, category) in the same order as above
     if (search) {
       countQuery = countQuery
         .where(searchField, '>=', search)
@@ -143,6 +147,9 @@ router.get('/getAllProducts', async (req, res) => {
     }
     if (branch_id) {
       countQuery = countQuery.where('branch_id', '==', branch_id);
+    }
+    if (category) {
+      countQuery = countQuery.where('category', '==', category);
     }
     if (min_quantity !== null && min_quantity !== undefined) {
       if (min_quantity >= -1) {
@@ -178,6 +185,86 @@ router.get('/getProductsByBranch/:branch_id', async (req, res) => {
   }
 });
 
+// Get OTC products by category
+router.get('/getProductsByCategory/:category', async (req, res) => {
+  try {
+    const { branch_id } = req.query;
+    let queryRef = admin.firestore().collection(COLLECTION).where('category', '==', req.params.category);
+    
+    if (branch_id) {
+      queryRef = queryRef.where('branch_id', '==', branch_id);
+    }
+    
+    const snapshot = await queryRef.get();
+    const products = snapshot.docs.map(doc => doc.data());
+    return res.status(200).json({ data: products });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all unique categories for a branch
+router.get('/getCategories/:branch_id', async (req, res) => {
+  try {
+    const { branch_id } = req.params;
+    
+    if (!branch_id) {
+      return res.status(400).json({ error: 'Branch ID is required' });
+    }
+
+    const snapshot = await admin.firestore()
+      .collection(COLLECTION)
+      .where('branch_id', '==', branch_id)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(200).json({ data: [] });
+    }
+
+    // Extract unique categories
+    const categories = new Set();
+    snapshot.docs.forEach(doc => {
+      const product = doc.data();
+      if (product.category) {
+        categories.add(product.category);
+      }
+    });
+
+    const uniqueCategories = Array.from(categories).sort();
+    return res.status(200).json({ data: uniqueCategories });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get OTC categories for a branch (from categories collection)
+router.get('/getOTCCategories/:branch_id', async (req, res) => {
+  try {
+    const { branch_id } = req.params;
+    
+    if (!branch_id) {
+      return res.status(400).json({ error: 'Branch ID is required' });
+    }
+
+    // Fetch categories from the categories collection with type 'otc'
+    const snapshot = await admin.firestore()
+      .collection('categories')
+      .where('branch_id', '==', branch_id)
+      .where('type', '==', 'otc')
+      .orderBy('name')
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(200).json({ data: [] });
+    }
+
+    const categories = snapshot.docs.map(doc => doc.data());
+    return res.status(200).json({ data: categories });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get a single OTC product by ID
 router.get('/getProduct/:id', async (req, res) => {
   try {
@@ -194,7 +281,7 @@ router.get('/getProduct/:id', async (req, res) => {
 // Update an OTC product by ID
 router.put('/updateProduct/:id', async (req, res) => {
   try {
-    const { name, price, retail_price, quantity, branch_id, status, min_quantity, brand } = req.body;
+    const { name, price, retail_price, quantity, branch_id, status, min_quantity, brand, category } = req.body;
     
     // Get the current product data to compare quantities
     const currentProductDoc = await admin.firestore().collection(COLLECTION).doc(req.params.id).get();
@@ -206,7 +293,7 @@ router.put('/updateProduct/:id', async (req, res) => {
     const oldQuantity = currentProduct.quantity || 0;
     const newQuantity = quantity !== undefined ? quantity : oldQuantity;
     
-    const updateData = { name, price, retail_price, quantity, branch_id, status, min_quantity, brand };
+    const updateData = { name, price, retail_price, quantity, branch_id, status, min_quantity, brand, category };
     // Remove undefined fields
     Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
     
@@ -469,6 +556,215 @@ router.get('/downloadTemplate', (req, res) => {
   }
 });
 
+// Download Excel template with dropdown validation
+router.get('/downloadExcelTemplate', async (req, res) => {
+  try {
+    const { branch_id } = req.query;
+    
+    if (!branch_id) {
+      return res.status(400).json({ 
+        error: 'branch_id is required as a query parameter (?branch_id=xxx)' 
+      });
+    }
+
+    console.log('Generating Excel template with dropdowns...');
+    
+    // Fetch OTC categories for the branch
+    let otcCategories = [];
+    try {
+      const categoriesSnapshot = await admin.firestore()
+        .collection('categories')
+        .where('branch_id', '==', branch_id)
+        .where('type', '==', 'otc')
+        .get();
+      
+      if (!categoriesSnapshot.empty) {
+        otcCategories = categoriesSnapshot.docs.map(doc => doc.data().name);
+      }
+      
+      // If no OTC categories found, add some default ones
+      if (otcCategories.length === 0) {
+        otcCategories = ['Personal Care', 'Health & Wellness', 'First Aid', 'Vitamins', 'Pain Relief', 'Dental Care'];
+      }
+    } catch (categoryError) {
+      console.warn('Could not fetch categories, using defaults:', categoryError.message);
+      otcCategories = ['Personal Care', 'Health & Wellness', 'First Aid', 'Vitamins', 'Pain Relief', 'Dental Care'];
+    }
+    
+    // Create Excel file with dropdown validation
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Michiko POS System';
+    workbook.lastModifiedBy = 'Michiko POS System';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    
+    const worksheet = workbook.addWorksheet('OTC Products Template');
+    
+    // Define headers for OTC products
+    const headers = ['name', 'price', 'retail_price', 'quantity', 'min_quantity', 'brand', 'category', 'status'];
+    
+    // Add headers row
+    const headerRow = worksheet.addRow(headers);
+    headerRow.font = { bold: true, size: 12 };
+    headerRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    
+    // Add sample data row
+    const sampleRow = worksheet.addRow([
+      'Sample Product',
+      15.50,
+      18.00,
+      100,
+      10,
+      'Sample Brand',
+      otcCategories[0] || 'Sample Category',
+      'active'
+    ]);
+    
+    // Style the sample row
+    sampleRow.font = { italic: true, size: 11 };
+    sampleRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE6F3FF' }
+    };
+    
+    // Set column widths
+    worksheet.getColumn('A').width = 25; // name
+    worksheet.getColumn('B').width = 12; // price
+    worksheet.getColumn('C').width = 12; // retail_price
+    worksheet.getColumn('D').width = 12; // quantity
+    worksheet.getColumn('E').width = 12; // min_quantity
+    worksheet.getColumn('F').width = 20; // brand
+    worksheet.getColumn('G').width = 20; // category
+    worksheet.getColumn('H').width = 12; // status
+    
+    // Add data validation for category column (dropdown)
+    const categoryList = otcCategories.join(',');
+    worksheet.dataValidations.add('G2:G1000', {
+      type: 'list',
+      allowBlank: false,
+      formulae: [`"${categoryList}"`],
+      showErrorMessage: true,
+      errorTitle: 'Invalid Category',
+      error: 'Please select from the dropdown list of available categories'
+    });
+    
+    // Add data validation for status column (dropdown)
+    worksheet.dataValidations.add('H2:H1000', {
+      type: 'list',
+      allowBlank: false,
+      formulae: ['"active,inactive"'],
+      showErrorMessage: true,
+      errorTitle: 'Invalid Status',
+      error: 'Please select from the dropdown list: active or inactive'
+    });
+    
+    // Add borders to all cells
+    worksheet.eachRow((row, rowNumber) => {
+      row.eachCell((cell, colNumber) => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      });
+    });
+    
+    // Add instructions sheet
+    const instructionsSheet = workbook.addWorksheet('Instructions');
+    instructionsSheet.addRow(['OTC Products Template - Instructions']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['1. Fill in the product details in the first sheet']);
+    instructionsSheet.addRow(['2. Use the dropdown lists for category and status columns']);
+    instructionsSheet.addRow(['3. Ensure all required fields are filled']);
+    instructionsSheet.addRow(['4. Save as Excel file for upload (CSV will lose dropdowns)']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['Field Descriptions:']);
+    instructionsSheet.addRow(['- name: Product name (required)']);
+    instructionsSheet.addRow(['- price: Cost price (required, positive number)']);
+    instructionsSheet.addRow(['- retail_price: Selling price (required, positive number)']);
+    instructionsSheet.addRow(['- quantity: Available quantity (required, non-negative number)']);
+    instructionsSheet.addRow(['- min_quantity: Minimum stock level (required, non-negative number)']);
+    instructionsSheet.addRow(['- brand: Product brand (required)']);
+    instructionsSheet.addRow(['- category: Product category (required, use dropdown)']);
+    instructionsSheet.addRow(['- status: Product status (required, use dropdown)']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['Available Categories:']);
+    otcCategories.forEach(category => {
+      instructionsSheet.addRow([`  • ${category}`]);
+    });
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['Available Status: active, inactive']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['⚠️  IMPORTANT: Save as Excel (.xlsx) to preserve dropdowns!']);
+    instructionsSheet.addRow(['   Saving as CSV will remove all dropdown validation.']);
+    
+    // Set response headers for Excel download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="otc_products_template_${branch_id}.xlsx"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
+    // Write to response using buffer to ensure proper Excel generation
+    try {
+      const buffer = await workbook.xlsx.writeBuffer();
+      res.send(buffer);
+      console.log('Excel file sent successfully with category dropdowns');
+    } catch (writeError) {
+      console.error('Error writing Excel buffer:', writeError);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to generate Excel file' });
+      }
+    }
+    
+  } catch (error) {
+    console.error('Error creating Excel template:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Download CSV template (simplified version)
+router.get('/downloadCSVTemplate', async (req, res) => {
+  try {
+    const { branch_id } = req.query;
+    
+    if (!branch_id) {
+      return res.status(400).json({ 
+        error: 'branch_id is required as a query parameter (?branch_id=xxx)' 
+      });
+    }
+
+    // Create CSV content with headers and sample data
+    const csvHeaders = 'name,price,retail_price,quantity,min_quantity,brand,category,status';
+    const csvSample = 'Sample Product,15.50,18.00,100,10,Sample Brand,Sample Category,active';
+    
+    // Create the CSV content
+    const csvContent = csvHeaders + '\n' + csvSample;
+
+    // Set proper headers for file download
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="otc_products_template_${branch_id}.csv"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    
+    // Send the CSV content
+    res.send(csvContent);
+    
+  } catch (error) {
+    console.error('Error creating CSV template:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Upload Excel/CSV file to insert OTC products
 router.post('/uploadProducts', upload.single('file'), async (req, res) => {
   try {
@@ -520,7 +816,7 @@ router.post('/uploadProducts', upload.single('file'), async (req, res) => {
     }
 
     // Validate required columns
-    const requiredColumns = ['name', 'price', 'retail_price', 'quantity', 'min_quantity', 'brand'];
+    const requiredColumns = ['name', 'price', 'retail_price', 'quantity', 'min_quantity', 'brand', 'category'];
     const firstRow = products[0];
     const missingColumns = requiredColumns.filter(col => !(col in firstRow));
     
@@ -566,11 +862,11 @@ router.post('/uploadProducts', upload.single('file'), async (req, res) => {
 
         try {
           // Validate required fields
-          if (!row.name || !row.price || !row.retail_price || !row.quantity || !row.min_quantity || !row.brand) {
+          if (!row.name || !row.price || !row.retail_price || !row.quantity || !row.min_quantity || !row.brand || !row.category) {
             return {
               row: rowNumber,
               status: 'error',
-              message: 'Missing required fields'
+              message: 'Missing required fields (name, price, retail_price, quantity, min_quantity, brand, category)'
             };
           }
 
@@ -636,6 +932,7 @@ router.post('/uploadProducts', upload.single('file'), async (req, res) => {
             quantity: quantity,
             min_quantity: min_quantity,
             brand: row.brand.trim(),
+            category: row.category.trim(),
             status: row.status || 'active',
             branch_id: branch_id,
             date_created: dateCreated

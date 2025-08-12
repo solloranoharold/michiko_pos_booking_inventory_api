@@ -1,11 +1,11 @@
-name,price,retail_price,quantity,min_quantity,brand,status
-Shampoo,15.50,18.00,100,10,Head & Shoulders,active
-Conditioner,18.75,22.00,80,8,Pantene,active
-Toothpaste,8.25,9.50,150,15,Colgate,active
-Toothbrush,5.00,6.00,200,20,Oral-B,active
-Soap,3.50,4.00,120,12,Dove,active
-Deodorant,12.00,14.50,90,9,Axe,active
-Vitamins,25.00,30.00,50,5,Centrum,active
-Pain Reliever,10.50,12.00,75,8,Advil,active
-Bandages,6.75,8.00,100,10,Band-Aid,active
-Antiseptic,9.25,11.00,60,6,Betadine,active 
+name,price,retail_price,quantity,min_quantity,brand,category,status
+Shampoo,15.50,18.00,100,10,Head & Shoulders,Personal Care,active
+Conditioner,18.75,22.00,80,8,Pantene,Personal Care,active
+Toothpaste,8.25,9.50,150,15,Colgate,Personal Care,active
+Toothbrush,5.00,6.00,200,20,Oral-B,Personal Care,active
+Soap,3.50,4.00,120,12,Dove,Personal Care,active
+Deodorant,12.00,14.50,90,9,Axe,Personal Care,active
+Vitamins,25.00,30.00,50,5,Centrum,Health & Wellness,active
+Pain Reliever,10.50,12.00,75,8,Advil,Health & Wellness,active
+Bandages,6.75,8.00,100,10,Band-Aid,First Aid,active
+Antiseptic,9.25,11.00,60,6,Betadine,First Aid,active 

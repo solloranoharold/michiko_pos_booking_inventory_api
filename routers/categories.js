@@ -14,8 +14,8 @@ function now() {
 // CREATE a new category
 router.post('/insertCategory', async (req, res) => {
   try {
-    const { name, branch_id } = req.body;
-    if (!name || !branch_id) {
+    const { name, branch_id , type } = req.body;
+    if (!name || !branch_id || !type) {
       return res.status(400).json({ error: 'Missing required fields: name and branch_id are required' });
     }
 
@@ -35,6 +35,7 @@ router.post('/insertCategory', async (req, res) => {
       id,
       name,
       branch_id,
+      type,
       date_created,
       doc_type: 'CATEGORY'
     };
@@ -129,7 +130,7 @@ router.put('/updateCategory/:id', async (req, res) => {
       return res.status(404).json({ error: 'Category not found' });
     }
 
-    const { name, branch_id } = req.body;
+    const { name, branch_id, type } = req.body;
     const prevData = categorySnap.data();
 
     // Check if the new name already exists in the same branch (excluding current category)
@@ -148,6 +149,7 @@ router.put('/updateCategory/:id', async (req, res) => {
     const updateData = {
       name: name || prevData.name,
       branch_id: branch_id || prevData.branch_id,
+      type: type || prevData.type,
       doc_type: 'CATEGORY'
     };
 
@@ -177,8 +179,17 @@ router.delete('/deleteCategory/:id', async (req, res) => {
 router.get('/getCategoriesByBranch/:branch_id', async (req, res) => {
   try {
     const { branch_id } = req.params;
-    const snapshot = await firestore.collection(CATEGORIES_COLLECTION)
-      .where('branch_id', '==', branch_id)
+    const { type } = req.query;
+    
+    let queryRef = firestore.collection(CATEGORIES_COLLECTION)
+      .where('branch_id', '==', branch_id);
+    
+    // Add type filter only if type is provided in query params
+    if (type) {
+      queryRef = queryRef.where('type', '==', type);
+    }
+    
+    const snapshot = await queryRef
       .orderBy('date_created', 'desc')
       .get();
     
@@ -186,6 +197,7 @@ router.get('/getCategoriesByBranch/:branch_id', async (req, res) => {
     return res.status(200).json({ data: categories });
   } catch (error) {
     res.status(500).json({ error: error.message });
+    throw error;
   }
 });
 

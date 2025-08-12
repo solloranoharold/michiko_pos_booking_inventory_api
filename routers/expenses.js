@@ -50,7 +50,8 @@ router.post('/insertExpense', async (req, res) => {
       amount: numericAmount,
       name,
       date_created,
-      doc_type: 'EXPENSE'
+      doc_type: 'EXPENSE',
+      status: 'active'
     };
 
     await firestore.collection(EXPENSES_COLLECTION).doc(id).set(expenseData);
@@ -250,8 +251,8 @@ router.put('/updateExpense/:id', async (req, res) => {
   }
 });
 
-// DELETE - Delete expense
-router.delete('/deleteExpense/:id', async (req, res) => {
+// DISABLE - Disable expense (soft delete)
+router.put('/disableExpense/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -265,14 +266,49 @@ router.delete('/deleteExpense/:id', async (req, res) => {
       return res.status(404).json({ error: 'Expense not found' });
     }
 
-    await firestore.collection(EXPENSES_COLLECTION).doc(id).delete();
+    // Update expense status to disabled
+    await firestore.collection(EXPENSES_COLLECTION).doc(id).update({
+      status: 'disabled',
+      date_updated: now()
+    });
 
     return res.status(200).json({
-      message: 'Expense deleted successfully'
+      message: 'Expense disabled successfully'
     });
 
   } catch (error) {
-    console.error('Error deleting expense:', error);
+    console.error('Error disabling expense:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// RESTORE - Restore disabled expense
+router.put('/restoreExpense/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({ error: 'Expense ID is required' });
+    }
+
+    // Check if expense exists
+    const expenseDoc = await firestore.collection(EXPENSES_COLLECTION).doc(id).get();
+    if (!expenseDoc.exists) {
+      return res.status(404).json({ error: 'Expense not found' });
+    }
+
+    // Update expense status to active
+    await firestore.collection(EXPENSES_COLLECTION).doc(id).update({
+      status: 'active',
+      date_updated: now()
+    });
+
+    return res.status(200).json({
+      message: 'Expense restored successfully'
+    });
+
+  } catch (error) {
+    console.error('Error restoring expense:', error);
     return res.status(500).json({ error: error.message });
   }
 });
@@ -297,7 +333,8 @@ router.get('/getExpensesByBranch/:branch_id', async (req, res) => {
     }
 
     let queryRef = firestore.collection(EXPENSES_COLLECTION)
-      .where('branch_id', '==', branch_id);
+      .where('branch_id', '==', branch_id)
+      .where('status', '==', 'active');
 
     if (category) {
       queryRef = queryRef.where('category', '==', category);
@@ -344,7 +381,8 @@ router.get('/getExpenseStats', async (req, res) => {
   try {
     const { branch_id = '', start_date = '', end_date = '' } = req.query;
 
-    let queryRef = firestore.collection(EXPENSES_COLLECTION);
+    let queryRef = firestore.collection(EXPENSES_COLLECTION)
+      .where('status', '==', 'active');
 
     // Apply filters
     if (branch_id) {

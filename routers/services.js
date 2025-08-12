@@ -5,6 +5,7 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 const csv = require('csv-parser');
 const path = require('path');
+const ExcelJS = require('exceljs');
 
 const router = express.Router();
 const SERVICES_COLLECTION = 'services';
@@ -361,37 +362,426 @@ const upload = multer({
 ]);
 
 // Download services template
-router.get('/downloadTemplate', (req, res) => {
+router.get('/downloadExcelTemplate', async (req, res) => {
   try {
-    const fs = require('fs');
-    const templatePath = path.join(__dirname, '../sample_services_template.csv');
+    const { branch_id } = req.query;
     
-    if (!fs.existsSync(templatePath)) {
-      return res.status(404).json({ error: 'Template file not found' });
+    if (!branch_id) {
+      return res.status(400).json({ 
+        error: 'branch_id is required as a query parameter (?branch_id=xxx)' 
+      });
     }
 
-    // Set proper headers for file download
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="services_template.csv"');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    // Fetch categories for the specified branch
+    const categoriesSnapshot = await admin.firestore()
+      .collection('categories')
+      .where('branch_id', '==', branch_id)
+      .where('type', '==', 'service')
+      .orderBy('name')
+      .get();
+
+    if (categoriesSnapshot.empty) {
+      return res.status(404).json({ 
+        error: 'No categories found for this branch. Please create categories first.' 
+      });
+    }
+
+    const categories = categoriesSnapshot.docs.map(doc => doc.data().name);
+
+    console.log('Generating Excel template with dropdowns...');
     
-    // Read and send the file
-    const fileStream = fs.createReadStream(templatePath);
-    fileStream.pipe(res);
+    // Create Excel file with dropdown validation
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Michiko POS System';
+    workbook.lastModifiedBy = 'Michiko POS System';
+    workbook.created = new Date();
+    workbook.modified = new Date();
     
-    // Handle stream errors
-    fileStream.on('error', (error) => {
-      console.error('Error reading template file:', error);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Error reading template file' });
-      }
+    const worksheet = workbook.addWorksheet('Services Template');
+    
+    // Define headers for services
+    const headers = ['name', 'description', 'category', 'price', 'status'];
+    
+    // Add headers row
+    const headerRow = worksheet.addRow(headers);
+    headerRow.font = { bold: true, size: 12 };
+    headerRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    
+    // Add sample data row
+    const sampleRow = worksheet.addRow([
+      'Sample Service',
+      'Sample service description',
+      categories[0] || 'Hair Services', // Use first available category or fallback
+      25.00,
+      'active'
+    ]);
+    
+    // Style the sample row
+    sampleRow.font = { italic: true, size: 11 };
+    sampleRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE6F3FF' }
+    };
+    
+    // Set column widths
+    worksheet.getColumn('A').width = 25; // name
+    worksheet.getColumn('B').width = 40; // description
+    worksheet.getColumn('C').width = 20; // category
+    worksheet.getColumn('D').width = 12; // price
+    worksheet.getColumn('E').width = 12; // status
+    
+    // Add data validation for category column (dropdown)
+    worksheet.dataValidations.add('C2:C1000', {
+      type: 'list',
+      allowBlank: false,
+      formulae: [`"${categories.join(',')}"`],
+      showErrorMessage: true,
+      errorTitle: 'Invalid Category',
+      error: 'Please select a category from the dropdown list.',
+      showInputMessage: true,
+      inputTitle: 'Select Category',
+      input: 'Choose a category from the dropdown list.'
     });
     
+    // Add data validation for status column (dropdown)
+    worksheet.dataValidations.add('E2:E1000', {
+      type: 'list',
+      allowBlank: false,
+      formulae: ['"active,inactive"'],
+      showErrorMessage: true,
+      errorTitle: 'Invalid Status',
+      error: 'Please select either "active" or "inactive".',
+      showInputMessage: true,
+      inputTitle: 'Select Status',
+      input: 'Choose either "active" or "inactive".'
+    });
+    
+    // Add data validation for price column (positive number)
+    worksheet.dataValidations.add('D2:D1000', {
+      type: 'decimal',
+      operator: 'greaterThan',
+      formulae: ['0'],
+      showErrorMessage: true,
+      errorTitle: 'Invalid Price',
+      error: 'Price must be a positive number.',
+      showInputMessage: true,
+      inputTitle: 'Enter Price',
+      input: 'Enter a positive number for the price.'
+    });
+    
+    // Add borders to all cells
+    worksheet.eachRow((row, rowNumber) => {
+      row.eachCell((cell, colNumber) => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      });
+    });
+    
+    // Add instructions sheet
+    const instructionsSheet = workbook.addWorksheet('Instructions');
+    instructionsSheet.addRow(['Services Template - Instructions']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['1. Fill in the service details in the first sheet']);
+    instructionsSheet.addRow(['2. Use the dropdown lists for category and status columns']);
+    instructionsSheet.addRow(['3. Ensure all required fields are filled']);
+    instructionsSheet.addRow(['4. Save as Excel file for upload (CSV will lose dropdowns)']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['Available Categories:']);
+    categories.forEach(category => {
+      instructionsSheet.addRow([`- ${category}`]);
+    });
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['Available Status: active, inactive']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['⚠️  IMPORTANT: Save as Excel (.xlsx) to preserve dropdowns!']);
+    instructionsSheet.addRow(['   Saving as CSV will remove all dropdown validation.']);
+    
+    // Set response headers for Excel download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="services_template_${branch_id}.xlsx"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
+    // Write to response using buffer to ensure proper Excel generation
+    try {
+      const buffer = await workbook.xlsx.writeBuffer();
+      res.send(buffer);
+      console.log('Excel file sent successfully');
+    } catch (writeError) {
+      console.error('Error writing Excel buffer:', writeError);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to generate Excel file' });
+      }
+    }
+    
   } catch (error) {
-    console.error('Error downloading template:', error);
+    console.error('Error creating Excel template:', error);
+    
+    // Fallback to static template if Excel generation fails
+    try {
+      const fs = require('fs');
+      const templatePath = path.join(__dirname, '../sample_services_template.csv');
+      
+      if (fs.existsSync(templatePath)) {
+        console.log('Falling back to static template due to error:', error.message);
+        
+        // Set proper headers for file download
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="services_template_fallback.csv"');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+        
+        // Read and send the file
+        const fileStream = fs.createReadStream(templatePath);
+        fileStream.pipe(res);
+        
+        // Handle stream errors
+        fileStream.on('error', (streamError) => {
+          console.error('Error reading fallback template file:', streamError);
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Error reading fallback template file' });
+          }
+        });
+        return;
+      }
+    } catch (fallbackError) {
+      console.error('Fallback template also failed:', fallbackError);
+    }
+    
     if (!res.headersSent) {
       res.status(500).json({ error: error.message });
     }
+  }
+});
+
+// Download Excel template with dropdown validation
+router.get('/downloadExcelTemplate', async (req, res) => {
+  try {
+    const { branch_id } = req.query;
+    
+    if (!branch_id) {
+      return res.status(400).json({ 
+        error: 'branch_id is required as a query parameter (?branch_id=xxx)' 
+      });
+    }
+
+    // Fetch categories for the specified branch
+    const categoriesSnapshot = await admin.firestore()
+      .collection('categories')
+      .where('branch_id', '==', branch_id)
+      .orderBy('name')
+      .get();
+
+    if (categoriesSnapshot.empty) {
+      return res.status(404).json({ 
+        error: 'No categories found for this branch. Please create categories first.' 
+      });
+    }
+
+    const categories = categoriesSnapshot.docs.map(doc => doc.data().name);
+
+    console.log('Generating Excel template with dropdowns...');
+    
+    // Create Excel file with dropdown validation
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Michiko POS System';
+    workbook.lastModifiedBy = 'Michiko POS System';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    
+    const worksheet = workbook.addWorksheet('Services Template');
+    
+    // Define headers for services
+    const headers = ['name', 'description', 'category', 'price', 'status'];
+    
+    // Add headers row
+    const headerRow = worksheet.addRow(headers);
+    headerRow.font = { bold: true, size: 12 };
+    headerRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    
+    // Add sample data row
+    const sampleRow = worksheet.addRow([
+      'Sample Service',
+      'Sample service description',
+      categories[0] || 'Hair Services', // Use first available category or fallback
+      25.00,
+      'active'
+    ]);
+    
+    // Style the sample row
+    sampleRow.font = { italic: true, size: 11 };
+    sampleRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE6F3FF' }
+    };
+    
+    // Set column widths
+    worksheet.getColumn('A').width = 25; // name
+    worksheet.getColumn('B').width = 40; // description
+    worksheet.getColumn('C').width = 20; // category
+    worksheet.getColumn('D').width = 12; // price
+    worksheet.getColumn('E').width = 12; // status
+    
+    // Add data validation for category column (dropdown)
+    worksheet.dataValidations.add('C2:C1000', {
+      type: 'list',
+      allowBlank: false,
+      formulae: [`"${categories.join(',')}"`],
+      showErrorMessage: true,
+      errorTitle: 'Invalid Category',
+      error: 'Please select a category from the dropdown list.',
+      showInputMessage: true,
+      inputTitle: 'Select Category',
+      input: 'Choose a category from the dropdown list.'
+    });
+    
+    // Add data validation for status column (dropdown)
+    worksheet.dataValidations.add('E2:E1000', {
+      type: 'list',
+      allowBlank: false,
+      formulae: ['"active,inactive"'],
+      showErrorMessage: true,
+      errorTitle: 'Invalid Status',
+      error: 'Please select either "active" or "inactive".',
+      showInputMessage: true,
+      inputTitle: 'Select Status',
+      input: 'Choose either "active" or "inactive".'
+    });
+    
+    // Add data validation for price column (positive number)
+    worksheet.dataValidations.add('D2:D1000', {
+      type: 'decimal',
+      operator: 'greaterThan',
+      formulae: ['0'],
+      showErrorMessage: true,
+      errorTitle: 'Invalid Price',
+      error: 'Price must be a positive number.',
+      showInputMessage: true,
+      inputTitle: 'Enter Price',
+      input: 'Enter a positive number for the price.'
+    });
+    
+    // Add borders to all cells
+    worksheet.eachRow((row, rowNumber) => {
+      row.eachCell((cell, colNumber) => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      });
+    });
+    
+    // Add instructions sheet
+    const instructionsSheet = workbook.addWorksheet('Instructions');
+    instructionsSheet.addRow(['Services Template - Instructions']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['1. Fill in the service details in the first sheet']);
+    instructionsSheet.addRow(['2. Use the dropdown lists for category and status columns']);
+    instructionsSheet.addRow(['3. Ensure all required fields are filled']);
+    instructionsSheet.addRow(['4. Save as Excel file for upload (CSV will lose dropdowns)']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['Available Categories:']);
+    categories.forEach(category => {
+      instructionsSheet.addRow([`- ${category}`]);
+    });
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['Available Status: active, inactive']);
+    instructionsSheet.addRow([]);
+    instructionsSheet.addRow(['⚠️  IMPORTANT: Save as Excel (.xlsx) to preserve dropdowns!']);
+    instructionsSheet.addRow(['   Saving as CSV will remove all dropdown validation.']);
+    
+    // Set response headers for Excel download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="services_template_${branch_id}.xlsx"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
+    // Write to response using buffer to ensure proper Excel generation
+    try {
+      const buffer = await workbook.xlsx.writeBuffer();
+      res.send(buffer);
+      console.log('Excel file sent successfully');
+    } catch (writeError) {
+      console.error('Error writing Excel buffer:', writeError);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to generate Excel file' });
+      }
+    }
+    
+  } catch (error) {
+    console.error('Error creating Excel template:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Download CSV template (simplified version)
+router.get('/downloadCSVTemplate', async (req, res) => {
+  try {
+    const { branch_id } = req.query;
+    
+    if (!branch_id) {
+      return res.status(400).json({ 
+        error: 'branch_id is required as a query parameter (?branch_id=xxx)' 
+      });
+    }
+
+    // Fetch categories for the specified branch
+    const categoriesSnapshot = await admin.firestore()
+      .collection('categories')
+      .where('branch_id', '==', branch_id)
+      .orderBy('name')
+      .get();
+
+    if (categoriesSnapshot.empty) {
+      return res.status(404).json({ 
+        error: 'No categories found for this branch. Please create categories first.' 
+      });
+    }
+
+    const categories = categoriesSnapshot.docs.map(doc => doc.data().name);
+    const categoryList = categories.join('|'); // Pipe-separated for reference
+
+    // Create CSV content with headers and sample data
+    const csvHeaders = 'name,description,category,price,status';
+    const csvSample = 'Sample Service,Sample service description,' + categoryList + ',25.00,active';
+    
+    // Create the CSV content
+    const csvContent = csvHeaders + '\n' + csvSample;
+
+    // Set proper headers for file download
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="services_template_${branch_id}.csv"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    
+    // Send the CSV content
+    res.send(csvContent);
+    
+  } catch (error) {
+    console.error('Error creating CSV template:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 

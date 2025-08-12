@@ -15,7 +15,47 @@ Downloads a sample CSV template file that users can use as a reference for the c
 
 **Response:** CSV file download
 
-### 2. Upload OTC Products File
+### 2. Download Excel Template with Dropdowns
+**GET** `/otcProducts/downloadExcelTemplate?branch_id={branch_id}`
+
+Downloads an Excel template with dropdown validation for category and status fields. The category dropdown is populated with OTC categories from the database.
+
+**Parameters:**
+- `branch_id` (required): The branch ID to fetch categories for
+
+**Response:** Excel file download with dropdown validation
+
+**Features:**
+- Category dropdown populated with OTC categories from the database
+- Status dropdown with 'active' and 'inactive' options
+- Sample data row with realistic values
+- Instructions sheet with field descriptions and available options
+
+### 4. Get OTC Categories
+**GET** `/otcProducts/getOTCCategories/{branch_id}`
+
+Retrieves all OTC categories for a specific branch from the categories collection.
+
+**Parameters:**
+- `branch_id` (path parameter): The branch ID to fetch categories for
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "id": "category123",
+      "name": "Personal Care",
+      "branch_id": "branch123",
+      "type": "otc",
+      "date_created": "2024-01-01T00:00:00.000Z",
+      "doc_type": "CATEGORY"
+    }
+  ]
+}
+```
+
+### 3. Upload OTC Products File
 **POST** `/otcProducts/uploadProducts`
 
 Uploads an Excel or CSV file to bulk insert OTC products.
@@ -32,7 +72,7 @@ Uploads an Excel or CSV file to bulk insert OTC products.
 **File Requirements:**
 - Supported formats: `.xlsx`, `.xls`, `.csv`
 - Maximum file size: 5MB
-- Required columns: `name`, `price`, `retail_price`, `quantity`, `min_quantity`, `brand`
+- Required columns: `name`, `price`, `retail_price`, `quantity`, `min_quantity`, `brand`, `category`
 - Optional columns: `status` (defaults to 'active')
 
 **Response:**
@@ -69,17 +109,26 @@ Uploads an Excel or CSV file to bulk insert OTC products.
 
 ### CSV Format
 ```csv
-name,price,retail_price,quantity,min_quantity,brand,status
-Shampoo,15.50,18.00,100,10,Head & Shoulders,active
-Conditioner,18.75,22.00,80,8,Pantene,active
+name,price,retail_price,quantity,min_quantity,brand,category,status
+Shampoo,15.50,18.00,100,10,Head & Shoulders,Personal Care,active
+Conditioner,18.75,22.00,80,8,Pantene,Personal Care,active
 ```
 
 ### Excel Format
 The Excel file should have the same column structure as the CSV format.
 
+**Excel Template Advantages:**
+- **Category Dropdown**: Pre-populated with available OTC categories from your database
+- **Status Dropdown**: Pre-defined options (active/inactive) to prevent errors
+- **Data Validation**: Built-in validation rules for better data quality
+- **Instructions Sheet**: Detailed field descriptions and available options
+- **Sample Data**: Realistic example row to guide users
+
+**Note**: Download the Excel template using `/downloadExcelTemplate?branch_id={branch_id}` to get the dropdown-enabled version with your branch's specific categories.
+
 ## Validation Rules
 
-1. **Required Fields:** All products must have `name`, `price`, `retail_price`, `quantity`, `min_quantity`, and `brand`
+1. **Required Fields:** All products must have `name`, `price`, `retail_price`, `quantity`, `min_quantity`, `brand`, and `category`
 2. **Price Validation:** Price must be a positive number
 3. **Retail Price Validation:** Retail price must be a positive number
 4. **Quantity Validation:** Quantity must be a non-negative number

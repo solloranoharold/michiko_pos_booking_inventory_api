@@ -1,13 +1,9 @@
 name,category,unit,quantity,unit_value,min_quantity,price,brand,status
-Shampoo,Hair Care,ml,500,2.50,50,3.00,L'Oréal,active
-Conditioner,Hair Care,ml,400,3.00,40,3.50,Pantene,active
-Hair Gel,Hair Styling,g,200,1.50,20,2.00,TRESemmé,active
-Hair Spray,Hair Styling,ml,300,2.00,30,2.50,Schwarzkopf,active
-Nail Polish,Nail Care,ml,15,5.00,5,6.00,OPI,active
-Nail Polish Remover,Nail Care,ml,200,1.00,20,1.50,Sally Hansen,active
-Facial Cleanser,Skin Care,ml,250,4.00,25,5.00,Neutrogena,active
-Moisturizer,Skin Care,ml,100,8.00,10,10.00,Cetaphil,active
-Massage Oil,Massage,ml,500,3.50,50,4.50,Bio-Oil,active
-Wax Strips,Hair Removal,pieces,50,0.50,5,0.75,Veet,active
-Cotton Pads,General,pieces,200,0.10,20,0.15,Generic,active
-Disposable Gloves,General,pairs,100,0.25,10,0.35,Generic,active 
+Sample Product,Hair Care,pcs,100,15.50,10,18.00,Sample Brand,active
+Hair Shampoo,Hair Care,bottle,50,12.75,5,15.00,Professional Brand,active
+Conditioner,Hair Care,bottle,45,14.25,5,17.50,Professional Brand,active
+Hair Gel,Styling & Make Up,tube,80,8.50,8,10.00,Styling Brand,active
+Nail Polish,Hand & Foot Care,bottle,120,6.25,12,8.00,Beauty Brand,active
+Face Cream,Skin Care,jar,60,18.00,6,22.00,Skincare Brand,active
+Massage Oil,Add Ons,bottle,30,25.50,3,30.00,Wellness Brand,active
+Hair Brush,Add Ons,piece,25,12.00,3,15.00,Professional Brand,active 
