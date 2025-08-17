@@ -177,10 +177,13 @@ router.get('/getAllProducts', async (req, res) => {
 // Get OTC products by branch_id
 router.get('/getProductsByBranch/:branch_id', async (req, res) => {
   try {
-    const snapshot = await admin.firestore().collection(COLLECTION).where('branch_id', '==', req.params.branch_id).get();
+    const snapshot = await admin.firestore().collection(COLLECTION)
+    .where('branch_id', '==', req.params.branch_id)
+    .where('retail_price', '>', 0).get();
     const products = snapshot.docs.map(doc => doc.data());
     return res.status(200).json({ data: products });
   } catch (error) {
+    console.error( error);
     res.status(500).json({ error: error.message });
   }
 });

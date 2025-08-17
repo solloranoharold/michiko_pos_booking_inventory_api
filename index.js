@@ -15,6 +15,7 @@ const transactionRouter = require('./routers/transaction');
 const expensesRouter = require('./routers/expenses');
 const discountRouter = require('./routers/discount');
 const paymentMethodsRouter = require('./routers/paymentMethods');
+const bookingRouter = require('./routers/booking');
 const requireAuthHeader = require('./authMiddleware');
 const verifyToken = require('./verifyToken');
 
@@ -45,7 +46,7 @@ app.use((req, res, next) => {
 app.use('/ftp', express.static('images'), serveIndex('images', {'icons': true, 'view': 'details'}))
 
 // Serve static images
-// app.use('/images', express.static(path.join(__dirname, 'images')));
+// app.use('/images', express.static(path.join(__dir name, 'images')));
 
 // Global error handler for multipart form errors
 app.use((error, req, res, next) => {
@@ -100,6 +101,7 @@ app.use('/api/transactions', transactionRouter);
 app.use('/api/expenses', expensesRouter);
 app.use('/api/discounts', discountRouter);
 app.use('/api/payment-methods', paymentMethodsRouter);
+app.use('/api/bookings', bookingRouter);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {

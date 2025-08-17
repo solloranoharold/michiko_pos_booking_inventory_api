@@ -22,6 +22,17 @@ function getSubscriptionType(date_created){
 router.post('/insertBranch', async (req, res) => {
   try {
     const { email, address, contactno ,name } = req.body;
+    
+    // Get authenticated user information
+    const authenticatedUser = req.user;
+    if (!authenticatedUser || !authenticatedUser.email) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Get user details from Firebase Auth token
+    let created_by =  authenticatedUser.email ||'master_admin';
+    let created_by_role = authenticatedUser.role || 'master_admin';
+
     if (!email || !address || !contactno ||!name) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -38,6 +49,8 @@ router.post('/insertBranch', async (req, res) => {
       name,
       address,
       contactno,
+      created_by: created_by ,
+      created_by_role: created_by_role ,
       doc_type: 'BRANCH',
       subscription_status: 'active',
       subscription_type: 'monthly',
@@ -178,7 +191,19 @@ router.put('/updateBranch/:id', async (req, res) => {
     if (!branchSnap.exists) {
       return res.status(404).json({ error: 'Branch not found' });
     }
-    const { email, address, contactno ,name ,subscription_status,subscription_type,subscription_start_date,subscription_end_date } = req.body;
+    
+    // Get authenticated user information
+    const authenticatedUser = req.user;
+    if (!authenticatedUser || !authenticatedUser.email) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Get user details from Firebase Auth token
+    let updated_by = authenticatedUser.name || authenticatedUser.email;
+    let updated_by_role = authenticatedUser.role || 'user';
+    let updated_by_branch = authenticatedUser.branch_id || '';
+    
+    const { email, address, contactno ,name ,subscription_status,subscription_type,subscription_start_date,subscription_end_date, created_by } = req.body;
     const prevData = branchSnap.data();
     const updateData = {
       email: email || prevData.email,
@@ -189,6 +214,10 @@ router.put('/updateBranch/:id', async (req, res) => {
       subscription_type: subscription_type || prevData.subscription_type,
       subscription_start_date: subscription_start_date || prevData.subscription_start_date,
       subscription_end_date: subscription_end_date || prevData.subscription_end_date,
+      created_by: created_by || prevData.created_by,
+      updated_by: updated_by || 'system',
+      updated_by_role: updated_by_role || 'system',
+      updated_by_branch: updated_by_branch || '',
       date_updated: now(),
       doc_type: 'BRANCH',
     };
@@ -217,12 +246,15 @@ router.delete('/deleteBranch/:id', async (req, res) => {
 
 router.get('/getBranchAll', async (req, res) => {
   try {
-    const snapshot = await firestore.collection(BRANCHES_COLLECTION)
-      .where('subscription_status', '==', 'active')
-      .get();
+
+    let queryRef = firestore.collection(BRANCHES_COLLECTION)
+      .where('subscription_status', '==', 'active');
+
+
+    const snapshot = await queryRef.get();
     const branches = snapshot.docs.map(doc => doc.data());
-    // res.json({ data: branches });
-    return res.status(200).json({data:branches})
+    
+    return res.status(200).json({ data: branches });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
