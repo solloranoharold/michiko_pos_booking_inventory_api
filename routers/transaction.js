@@ -1840,6 +1840,28 @@ router.get('/getAllCommissions', async (req, res) => {
 
     // get All without pagination 
     let queryRefAll = firestore.collection(COMMISSIONS_COLLECTION);
+    
+    // Apply same filters as the main query for consistency
+    if(branch_id){
+      queryRefAll = queryRefAll.where('branch_id', '==', branch_id);
+    }
+    if (account_id) {
+      queryRefAll = queryRefAll.where('account_id', '==', account_id);
+    }
+    if (status) {
+      queryRefAll = queryRefAll.where('status', '==', status);
+    }
+    if (search) {
+      queryRefAll = queryRefAll.where('account_id', '==', search);
+    }
+    if (date_from) {
+      queryRefAll = queryRefAll.where('date_created', '>=', date_from);
+    }
+    if (date_to) {
+      const nextDay = moment(date_to).add(1, 'day').format('YYYY-MM-DD');
+      queryRefAll = queryRefAll.where('date_created', '<', nextDay);
+    }
+    
     const snapshotAll = await queryRefAll.get();
     const commissionsAll = snapshotAll.docs.map(doc => doc.data());
     const totalCommissionAmountAll = commissionsAll.reduce((sum, commission) => sum + (commission.amount || 0), 0);
