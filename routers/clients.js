@@ -381,12 +381,12 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
     }
 
     // Get updated_by from query parameters or form body (query params take priority)
-    const updated_by = req.query.updated_by || req.body.updated_by;
-    if (!updated_by) {
-      return res.status(400).json({ 
-        error: 'updated_by is required. Provide it as a query parameter (?updated_by=xxx) or in the form body' 
-      });
-    }
+    // const updated_by = req.query.updated_by || req.body.updated_by;
+    // if (!updated_by) {
+    //   return res.status(400).json({ 
+    //     error: 'updated_by is required. Provide it as a query parameter (?updated_by=xxx) or in the form body' 
+    //   });
+    // }
 
     const fileBuffer = req.file.buffer;
     const fileExtension = path.extname(req.file.originalname).toLowerCase();
@@ -512,7 +512,6 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
             dateCreated,
             dateUpdated,
             status: row.status ? row.status.trim() : 'active', // Default to 'active' if not provided
-            updated_by,
             doc_type: 'CLIENTS'
           };
 
