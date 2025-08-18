@@ -22,6 +22,7 @@ router.post('/insertCategory', async (req, res) => {
     // Check if a category with the same name already exists in the same branch
     const snapshot = await firestore.collection(CATEGORIES_COLLECTION)
       .where('name', '==', name)
+      .where('type', '==', type)
       .where('branch_id', '==', branch_id)
       .get();
     
