@@ -350,7 +350,7 @@ Created: ${created_at}
                         ]
                     },
                     colorId: getCalendarColorId(status),
-                    visibility: 'private',
+                    visibility: 'public',
                     extendedProperties: {
                         private: {
                             bookingId: booking_id,
