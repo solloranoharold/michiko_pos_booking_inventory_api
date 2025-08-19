@@ -10,49 +10,63 @@ const router = express.Router();
 const firestore = admin.firestore();
 const BOOKINGS_COLLECTION = 'bookings';
 
-// Cache for calendar ID to avoid repeated setup
-let cachedCalendarId = null;
+// Cache for calendar IDs by branch to avoid repeated setup
+let cachedCalendarIds = new Map();
 
-// Helper function to get or create a calendar for bookings
-async function getBookingCalendarId(calendar) {
-    if (cachedCalendarId) {
-        return cachedCalendarId;
+// Helper function to get or create a calendar for bookings by branch
+async function getBookingCalendarId(calendar, branchName = 'Default Branch') {
+    // Sanitize branch name for calendar usage
+    const sanitizedBranchName = branchName.replace(/[^a-zA-Z0-9\s-]/g, '').trim() || 'Default Branch';
+    
+    if (cachedCalendarIds.has(sanitizedBranchName)) {
+        return cachedCalendarIds.get(sanitizedBranchName);
     }
     
-    let calendarId = process.env.GOOGLE_CALENDAR_ID;
+    let calendarId = "";
     
     if (!calendarId) {
         try {
-            // First, try to find an existing "Bookings" calendar
+            // First, try to find an existing calendar for this branch
             const calendarList = await calendar.calendarList.list();
-            const bookingsCalendar = calendarList.data.items?.find(cal => 
-                cal.summary === 'Bookings Calendar' || cal.summary.includes('Booking')
+            const expectedCalendarName = `${sanitizedBranchName} - Bookings Calendar`;
+            const branchCalendar = calendarList.data.items?.find(cal => 
+                cal.summary === expectedCalendarName || 
+                cal.summary.includes(`${sanitizedBranchName}`) && cal.summary.includes('Booking')
             );
             
-            if (bookingsCalendar) {
-                calendarId = bookingsCalendar.id;
-                console.log('Using existing bookings calendar:', calendarId);
+            if (branchCalendar) {
+                calendarId = branchCalendar.id;
+                console.log(`Using existing calendar for ${sanitizedBranchName}:`, calendarId);
             } else {
-                // Create a new calendar for bookings
+                // Create a new calendar for this branch
                 const newCalendar = await calendar.calendars.insert({
                     requestBody: {
-                        summary: 'Bookings Calendar',
-                        description: 'Calendar for managing booking appointments',
+                        summary: expectedCalendarName,
+                        description: `Calendar for managing booking appointments at ${sanitizedBranchName}`,
                         timeZone: 'Asia/Manila'
                     }
                 });
                 calendarId = newCalendar.data.id;
-                console.log('Created new bookings calendar:', calendarId);
+                console.log(`Created new calendar for ${sanitizedBranchName}:`, calendarId);
+                
+                // Share the newly created calendar with master_admin users
+                const sharingResult = await shareCalendarWithMasterAdmins(calendar, calendarId, sanitizedBranchName);
+                if (sharingResult.shared) {
+                    console.log(`Calendar shared with ${sharingResult.count} master_admin(s) for ${sanitizedBranchName}`);
+                } else {
+                    console.log(`Failed to share calendar with master_admin users for ${sanitizedBranchName}`);
+                }
             }
         } catch (calendarSetupError) {
-            console.error('Error setting up calendar:', calendarSetupError.message);
-            // Fallback: use a generated calendar ID based on service account
-            calendarId = `bookings-${(process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL || 'default').replace(/[@.]/g, '-')}`;
-            console.log('Using fallback calendar ID:', calendarId);
+            console.error(`Error setting up calendar for ${sanitizedBranchName}:`, calendarSetupError.message);
+            // Fallback: use a generated calendar ID based on branch and service account
+            const serviceAccountId = (process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL || 'default').replace(/[@.]/g, '-');
+            calendarId = `bookings-${sanitizedBranchName.replace(/\s+/g, '-').toLowerCase()}-${serviceAccountId}`;
+            console.log(`Using fallback calendar ID for ${sanitizedBranchName}:`, calendarId);
         }
     }
     
-    cachedCalendarId = calendarId;
+    cachedCalendarIds.set(sanitizedBranchName, calendarId);
     return calendarId;
 }
 
@@ -183,17 +197,293 @@ async function getServicesDetails(serviceIds) {
     }
 }
 
-
-// CREATE - Create a new booking
-router.post('/createBooking', async (req, res) => { 
+// Helper function to get all master_admin emails
+async function getMasterAdminEmails() {
     try {
-        let { client_id, branch_id, date, time, service_ids = [], status = 'scheduled' , notes = '' } = req.body;
+        const accountsSnapshot = await firestore.collection('accounts')
+            .where('role', '==', 'master_admin')
+            .where('status', '==', 'active')
+            .get();
+        
+        const emails = [];
+        accountsSnapshot.forEach(doc => {
+            const accountData = doc.data();
+            if (accountData.email) {
+                emails.push(accountData.email);
+            }
+        });
+        
+        console.log(`Found ${emails.length} master_admin emails:`, emails);
+        return emails;
+    } catch (error) {
+        console.error('Error fetching master_admin emails:', error);
+        return [];
+    }
+}
+
+// Helper function to get emails for multiple roles with branch filtering
+async function getBranchAuthorizedEmails(branchId) {
+    try {
+        const emails = [];
+        
+        // Get master_admin emails (no branch filtering needed)
+        const masterAdminSnapshot = await firestore.collection('accounts')
+            .where('role', '==', 'master_admin')
+            .where('status', '==', 'active')
+            .get();
+        
+        masterAdminSnapshot.forEach(doc => {
+            const accountData = doc.data();
+            if (accountData.email) {
+                emails.push({
+                    email: accountData.email,
+                    role: 'master_admin',
+                    branchId: accountData.branch_id || null
+                });
+            }
+        });
+        
+        // Get super_admin emails (no branch filtering needed)
+        const superAdminSnapshot = await firestore.collection('accounts')
+            .where('role', '==', 'super_admin')
+            .where('status', '==', 'active')
+            .get();
+        
+        superAdminSnapshot.forEach(doc => {
+            const accountData = doc.data();
+            if (accountData.email) {
+                emails.push({
+                    email: accountData.email,
+                    role: 'super_admin',
+                    branchId: accountData.branch_id || null
+                });
+            }
+        });
+        
+        // Get branch-specific emails (branch, cashier roles with matching branch_id)
+        const branchSpecificRoles = ['branch', 'cashier'];
+        
+        for (const role of branchSpecificRoles) {
+            const roleSnapshot = await firestore.collection('accounts')
+                .where('role', '==', role)
+                .where('branch_id', '==', branchId)
+                .where('status', '==', 'active')
+                .get();
+            
+            roleSnapshot.forEach(doc => {
+                const accountData = doc.data();
+                if (accountData.email) {
+                    emails.push({
+                        email: accountData.email,
+                        role: role,
+                        branchId: accountData.branch_id
+                    });
+                }
+            });
+        }
+        
+        // Remove duplicates by email (in case someone has multiple roles)
+        const uniqueEmails = [];
+        const emailSet = new Set();
+        
+        emails.forEach(emailObj => {
+            if (!emailSet.has(emailObj.email)) {
+                emailSet.add(emailObj.email);
+                uniqueEmails.push(emailObj);
+            }
+        });
+        
+        console.log(`Found ${uniqueEmails.length} authorized emails for branch ${branchId}:`);
+        uniqueEmails.forEach(emailObj => {
+            console.log(`- ${emailObj.email} (${emailObj.role}, branch: ${emailObj.branchId})`);
+        });
+        
+        return uniqueEmails;
+    } catch (error) {
+        console.error('Error fetching branch authorized emails:', error);
+        return [];
+    }
+}
+
+// Helper function to share calendar with master_admin users
+async function shareCalendarWithMasterAdmins(calendar, calendarId, branchName) {
+    try {
+        const masterAdminEmails = await getMasterAdminEmails();
+        
+        if (masterAdminEmails.length === 0) {
+            console.log('No master_admin users found to share calendar with');
+            return { shared: false, count: 0, emails: [] };
+        }
+        
+        const sharingPromises = masterAdminEmails.map(async (email) => {
+            try {
+                // Share calendar with master_admin with 'owner' role (full access)
+                await calendar.acl.insert({
+                    calendarId: calendarId,
+                    requestBody: {
+                        role: 'owner', // owner, reader, writer, freeBusyReader
+                        scope: {
+                            type: 'user',
+                            value: email
+                        }
+                    }
+                });
+                console.log(`Successfully shared ${branchName} calendar with master_admin: ${email}`);
+                return { email, success: true };
+            } catch (shareError) {
+                console.error(`Failed to share ${branchName} calendar with ${email}:`, shareError.message);
+                return { email, success: false, error: shareError.message };
+            }
+        });
+        
+        const results = await Promise.all(sharingPromises);
+        const successfulShares = results.filter(r => r.success);
+        const failedShares = results.filter(r => !r.success);
+        
+        console.log(`Calendar sharing summary for ${branchName}:`);
+        console.log(`- Successfully shared with ${successfulShares.length} master_admin(s)`);
+        console.log(`- Failed to share with ${failedShares.length} master_admin(s)`);
+        
+        if (failedShares.length > 0) {
+            console.log('Failed shares:', failedShares.map(f => `${f.email}: ${f.error}`));
+        }
+        
+        return {
+            shared: successfulShares.length > 0,
+            count: successfulShares.length,
+            emails: successfulShares.map(s => s.email),
+            failed: failedShares,
+            total_attempts: masterAdminEmails.length
+        };
+    } catch (error) {
+        console.error(`Error sharing calendar for ${branchName}:`, error);
+        return { shared: false, count: 0, emails: [], error: error.message };
+    }
+}
+
+// Helper function to share branch calendar with all authorized users (master_admin, super_admin, branch, cashier)
+async function shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, branchName, branchId) {
+    try {
+        const authorizedUsers = await getBranchAuthorizedEmails(branchId);
+        
+        if (authorizedUsers.length === 0) {
+            console.log(`No authorized users found to share ${branchName} calendar with`);
+            return { shared: false, count: 0, emails: [], by_role: {} };
+        }
+        
+        // Define access levels by role
+        const roleAccessLevels = {
+            'master_admin': 'owner',    // Full access
+            'super_admin': 'owner',     // Full access
+            'branch': 'writer',         // Can create/edit events
+            'cashier': 'reader'         // Read-only access
+        };
+        
+        const sharingPromises = authorizedUsers.map(async (userObj) => {
+            try {
+                const accessLevel = roleAccessLevels[userObj.role] || 'reader';
+                
+                // Share calendar with appropriate access level
+                await calendar.acl.insert({
+                    calendarId: calendarId,
+                    requestBody: {
+                        role: accessLevel,
+                        scope: {
+                            type: 'user',
+                            value: userObj.email
+                        }
+                    }
+                });
+                
+                console.log(`Successfully shared ${branchName} calendar with ${userObj.role}: ${userObj.email} (${accessLevel} access)`);
+                return { 
+                    email: userObj.email, 
+                    role: userObj.role,
+                    accessLevel: accessLevel,
+                    branchId: userObj.branchId,
+                    success: true 
+                };
+            } catch (shareError) {
+                console.error(`Failed to share ${branchName} calendar with ${userObj.role} ${userObj.email}:`, shareError.message);
+                return { 
+                    email: userObj.email, 
+                    role: userObj.role,
+                    accessLevel: roleAccessLevels[userObj.role] || 'reader',
+                    branchId: userObj.branchId,
+                    success: false, 
+                    error: shareError.message 
+                };
+            }
+        });
+        
+        const results = await Promise.all(sharingPromises);
+        const successfulShares = results.filter(r => r.success);
+        const failedShares = results.filter(r => !r.success);
+        
+        // Group results by role for detailed reporting
+        const sharesByRole = {};
+        results.forEach(result => {
+            if (!sharesByRole[result.role]) {
+                sharesByRole[result.role] = { successful: 0, failed: 0, emails: [] };
+            }
+            if (result.success) {
+                sharesByRole[result.role].successful++;
+                sharesByRole[result.role].emails.push(result.email);
+            } else {
+                sharesByRole[result.role].failed++;
+            }
+        });
+        
+        console.log(`Branch calendar sharing summary for ${branchName} (Branch ID: ${branchId}):`);
+        console.log(`- Total authorized users: ${authorizedUsers.length}`);
+        console.log(`- Successfully shared with: ${successfulShares.length} users`);
+        console.log(`- Failed to share with: ${failedShares.length} users`);
+        
+        Object.keys(sharesByRole).forEach(role => {
+            const roleData = sharesByRole[role];
+            console.log(`- ${role}: ${roleData.successful} successful, ${roleData.failed} failed`);
+        });
+        
+        if (failedShares.length > 0) {
+            console.log('Failed shares:', failedShares.map(f => `${f.email} (${f.role}): ${f.error}`));
+        }
+        
+        return {
+            shared: successfulShares.length > 0,
+            count: successfulShares.length,
+            emails: successfulShares.map(s => s.email),
+            by_role: sharesByRole,
+            successful_shares: successfulShares,
+            failed_shares: failedShares,
+            total_attempts: authorizedUsers.length,
+            access_levels: roleAccessLevels
+        };
+    } catch (error) {
+        console.error(`Error sharing branch calendar for ${branchName}:`, error);
+        return { shared: false, count: 0, emails: [], error: error.message };
+    }
+}
+
+
+
+// CREATE - Create a new booking per branch with dedicated calendar
+router.post('/createBookingperBranch', async (req, res) => {
+    try {
+        let { client_id, branch_id, date, time, service_ids = [], status = 'scheduled', notes = '' } = req.body;
         date = moment.tz(date, 'Asia/Manila').format('YYYY-MM-DD');
 
         // Validate required fields
         if (!client_id || !branch_id || !date || !time) {
             return res.status(400).json({ 
                 error: 'Missing required fields: client_id, branch_id, date, time are required' 
+            });
+        }
+
+        // Get branch details first to ensure branch exists
+        const branchDetails = await getBranchDetails(branch_id);
+        if (!branchDetails.name || branchDetails.name === 'Unknown Branch') {
+            return res.status(404).json({ 
+                error: 'Branch not found or invalid branch_id provided' 
             });
         }
 
@@ -227,19 +517,23 @@ router.post('/createBooking', async (req, res) => {
             created_at,
             updated_at
         };
+
         // Fetch related data for rich calendar event
-        const [clientDetails, branchDetails, servicesDetails] = await Promise.all([
+        const [clientDetails, servicesDetails] = await Promise.all([
             getClientDetails(client_id),
-            getBranchDetails(branch_id),
             getServicesDetails(service_ids)
         ]);
 
         const { services, totalCost } = servicesDetails;
 
-        // Create enhanced calendar event using service account
+        // Setup Google Calendar integration with enhanced branch-specific logic
         let calendarResponse = null;
         let calendarId = null;
-        let scopes = [
+        let calendarCreated = false;
+        let calendarShared = false;
+        let sharingDetails = {};
+        
+        const scopes = [
             'https://www.googleapis.com/auth/calendar',
             'https://www.googleapis.com/auth/calendar.events'
         ];
@@ -254,52 +548,93 @@ router.post('/createBooking', async (req, res) => {
             
             const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
             
-            // Get or create a calendar for bookings
-            calendarId = await getBookingCalendarId(calendar);
+            // Enhanced calendar setup with proper naming convention
+            const branchCalendarName = `${branchDetails.name} Bookings`;
+            console.log(`Setting up calendar for branch: ${branchDetails.name}`);
+            console.log(`Expected calendar name: ${branchCalendarName}`);
+            
+            // Check if calendar already exists for this branch
+            const calendarList = await calendar.calendarList.list();
+            let existingCalendar = calendarList.data.items?.find(cal => 
+                cal.summary === branchCalendarName ||
+                cal.summary === `${branchDetails.name} - Bookings Calendar`
+            );
+            
+            if (existingCalendar) {
+                calendarId = existingCalendar.id;
+                console.log(`Using existing calendar for ${branchDetails.name}:`, calendarId);
+            } else {
+                // Create new calendar for this branch
+                console.log(`Creating new calendar for branch: ${branchDetails.name}`);
+                const newCalendar = await calendar.calendars.insert({
+                    requestBody: {
+                        summary: branchCalendarName,
+                        description: `Dedicated booking calendar for ${branchDetails.name} branch. All appointments and bookings for this location are managed here.`,
+                        timeZone: 'Asia/Manila'
+                    }
+                });
+                
+                calendarId = newCalendar.data.id;
+                calendarCreated = true;
+                console.log(`Successfully created new calendar for ${branchDetails.name}:`, calendarId);
+            }
+            
+            // Always attempt to share calendar with all authorized users (master_admin, super_admin, branch, cashier)
+            console.log(`Ensuring calendar is shared with all authorized users for ${branchDetails.name} (Branch ID: ${branch_id})`);
+            const sharingResult = await shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, branchDetails.name, branch_id);
+            
+            calendarShared = sharingResult.shared;
+            sharingDetails = {
+                successful_shares: sharingResult.count,
+                shared_emails: sharingResult.emails,
+                failed_shares: sharingResult.failed_shares || [],
+                total_attempts: sharingResult.total_attempts || 0,
+                by_role: sharingResult.by_role || {},
+                access_levels: sharingResult.access_levels || {}
+            };
+            
+            console.log(`Calendar sharing result for ${branchDetails.name}:`, sharingDetails);
 
-                // Calculate end time with default 1-hour duration
-                // Parse date/time explicitly in Manila timezone to avoid timezone issues
-                console.log('Input date:', date, 'Input time:', time);
-                
-                // Create moment object in Manila timezone with explicit format parsing
-                const dateTimeString = `${date} ${time}`;
-                console.log('Combined datetime string:', dateTimeString);
-                
-                // Try multiple formats to parse the input correctly
-                let startDateTime;
-                
-                // Try HH:mm:ss format first
-                startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila');
-                
-                // If that fails, try HH:mm format
-                if (!startDateTime.isValid()) {
-                    startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm', 'Asia/Manila');
-                }
-                
-                // If still not valid, try fallback with T separator
-                if (!startDateTime.isValid()) {
-                    startDateTime = moment.tz(`${date}T${time}`, 'Asia/Manila');
-                }
-                
-                // If all parsing attempts fail, throw an error
-                if (!startDateTime.isValid()) {
-                    throw new Error(`Unable to parse date and time: ${date} ${time}`);
-                }
+            // Create enhanced calendar event
+            console.log('Input date:', date, 'Input time:', time);
+            
+            // Create moment object in Manila timezone with explicit format parsing
+            const dateTimeString = `${date} ${time}`;
+            console.log('Combined datetime string:', dateTimeString);
+            
+            // Try multiple formats to parse the input correctly
+            let startDateTime;
+            
+            // Try HH:mm:ss format first
+            startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila');
+            
+            // If that fails, try HH:mm format
+            if (!startDateTime.isValid()) {
+                startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm', 'Asia/Manila');
+            }
+            
+            // If still not valid, try fallback with T separator
+            if (!startDateTime.isValid()) {
+                startDateTime = moment.tz(`${date}T${time}`, 'Asia/Manila');
+            }
+            
+            // If all parsing attempts fail, throw an error
+            if (!startDateTime.isValid()) {
+                throw new Error(`Unable to parse date and time: ${date} ${time}`);
+            }
 
-                const endDateTime = startDateTime.clone().add(60, 'minutes'); // Default 1-hour duration
-                
-                console.log('Parsed start datetime:', startDateTime.format());
-                console.log('Parsed start datetime RFC3339:', startDateTime.format('YYYY-MM-DDTHH:mm:ssZ'));
-                console.log('Parsed end datetime:', endDateTime.format());
-                console.log('Parsed end datetime RFC3339:', endDateTime.format('YYYY-MM-DDTHH:mm:ssZ'));
+            const endDateTime = startDateTime.clone().add(60, 'minutes'); // Default 1-hour duration
+            
+            console.log('Parsed start datetime:', startDateTime.format());
+            console.log('Parsed end datetime:', endDateTime.format());
 
-                // Create detailed event description
-                const servicesList = services.length > 0 
-                    ? services.map(s => `• ${s.name} (${s.category}) - ₱${s.price.toFixed(2)}`).join('\n')
-                    : '• No specific services selected';
+            // Create detailed event description
+            const servicesList = services.length > 0 
+                ? services.map(s => `• ${s.name} (${s.category}) - ₱${s.price.toFixed(2)}`).join('\n')
+                : '• No specific services selected';
 
-                const eventDescription = `
-📅 BOOKING DETAILS
+            const eventDescription = `
+📅 BRANCH BOOKING DETAILS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 👤 CLIENT INFORMATION
@@ -325,130 +660,130 @@ Booking ID: ${booking_id}
 ${notes ? `📝 NOTES\n${notes}` : ''}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Branch Calendar: ${branchCalendarName}
 Created: ${created_at}
-                `.trim();
+            `.trim();
 
-                const event = {
-                    summary: `${clientDetails.name} - ${branchDetails.name}${services.length > 0 ? ` (${services.map(s => s.name).join(', ')})` : ''}`,
-                    description: eventDescription,
-                    start: { 
-                        // Use RFC 3339 format with explicit timezone offset (+08:00 for Asia/Manila)
-                        // This ensures Google Calendar displays the correct time regardless of user's timezone
-                        dateTime: startDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
-                        timeZone: 'Asia/Manila'
-                    },
-                    end: { 
-                        dateTime: endDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
-                        timeZone: 'Asia/Manila'
-                    },
-                    location: branchDetails.address,
-                    reminders: {
-                        useDefault: false,
-                        overrides: [
-                            { method: 'email', minutes: 24 * 60 }, // 24 hours before
-                            { method: 'popup', minutes: 30 }       // 30 minutes before
-                        ]
-                    },
-                    colorId: getCalendarColorId(status),
-                    visibility: 'public',
-                    extendedProperties: {
-                        private: {
-                            bookingId: booking_id,
-                            clientId: client_id,
-                            branchId: branch_id,
-                            totalCost: totalCost.toString(),
-                            serviceIds: JSON.stringify(service_ids),
-                            bookingStatus: status
-                        }
+            const event = {
+                summary: `${clientDetails.name} - ${branchDetails.name}${services.length > 0 ? ` (${services.map(s => s.name).join(', ')})` : ''}`,
+                description: eventDescription,
+                start: { 
+                    dateTime: startDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                    timeZone: 'Asia/Manila'
+                },
+                end: { 
+                    dateTime: endDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                    timeZone: 'Asia/Manila'
+                },
+                location: branchDetails.address,
+                reminders: {
+                    useDefault: false,
+                    overrides: [
+                        { method: 'email', minutes: 24 * 60 }, // 24 hours before
+                        { method: 'popup', minutes: 30 }       // 30 minutes before
+                    ]
+                },
+                colorId: getCalendarColorId(status),
+                visibility: 'public',
+                extendedProperties: {
+                    private: {
+                        bookingId: booking_id,
+                        clientId: client_id,
+                        branchId: branch_id,
+                        branchName: branchDetails.name,
+                        totalCost: totalCost.toString(),
+                        serviceIds: JSON.stringify(service_ids),
+                        bookingStatus: status,
+                        calendarType: 'branch_specific'
                     }
+                }
+            };
+
+            console.log(`Creating calendar event in branch calendar: ${branchCalendarName} (${calendarId})`);
+            calendarResponse = await calendar.events.insert({ 
+                calendarId, 
+                requestBody: event 
+            });
+            
+            if (calendarResponse.status === 200) {
+                console.log('Enhanced branch booking created in calendar API successfully');
+                console.log('Calendar event ID:', calendarResponse.data.id);
+                console.log('Calendar event link:', calendarResponse.data.htmlLink);
+                
+                // Add calendar details to booking data
+                const enhancedBookingData = {
+                    ...bookingData,
+                    calendar_event_id: calendarResponse?.data?.id || null,
+                    calendar_event_link: calendarResponse?.data?.htmlLink || null,
+                    calendar_id: calendarId,
+                    calendar_name: branchCalendarName,
+                    estimated_total_cost: totalCost,
                 };
 
-                console.log('Attempting to create calendar event with calendar ID:', calendarId);
-                calendarResponse = await calendar.events.insert({ calendarId, requestBody: event });
-                
-                if(calendarResponse.status === 200){
-                    console.log('Enhanced booking created in calendar API successfully');
-                    console.log('Calendar event ID:', calendarResponse.data.id);
-                    console.log('Calendar event link:', calendarResponse.data.htmlLink);
-                     // Add calendar details to booking data
-                        const enhancedBookingData = {
-                            ...bookingData,
-                            calendar_event_id: calendarResponse?.data?.id || null,
-                            calendar_event_link: calendarResponse?.data?.htmlLink || null,
-                            estimated_total_cost: totalCost,
-                        };
+                // Save to firestore 
+                await firestore.collection(BOOKINGS_COLLECTION).doc(booking_id).set(enhancedBookingData);
 
-                        //  save to firestore 
-                        await firestore.collection(BOOKINGS_COLLECTION).doc(booking_id).set(enhancedBookingData);
-
-                        res.status(201).json({ 
-                            message: 'Booking created successfully', 
-                            booking_id,
-                            booking: enhancedBookingData,
-                            calendar_event_id: calendarResponse?.data?.id || null,
-                            calendar_event_link: calendarResponse?.data?.htmlLink || null,
-                            calendar_created: !!calendarResponse,
-                            estimated_total_cost: totalCost,
-                            background_color: getStatusBackgroundColor(status),
-                            client_details: clientDetails,
-                            branch_details: branchDetails,
-                            services_details: services
-                        });
-
-                }else{
-                    console.log('Booking not created in calendar API');
-                    res.status(500).json({ error: 'Failed to create booking' });
-                }
-            } catch (calendarError) {
-                console.error('Error creating calendar event:', {
-                    error: calendarError.message,
-                    status: calendarError.response?.status,
-                    statusText: calendarError.response?.statusText,
-                    details: calendarError.response?.data,
-                    calendarId: calendarId,
-                    hasGoogleCredentials: !!(process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL)
-                });
-                
-                // Log more specific error information
-                if (calendarError.message.includes('authentication') || calendarError.message.includes('credentials')) {
-                    console.log('Authentication issue detected. Please ensure:');
-                    console.log('1. Google service account credentials are properly configured');
-                    console.log('2. Service account has access to the calendar');
-                    console.log('3. Calendar API is enabled in Google Cloud Console');
-                    console.log('4. Service account has proper roles (Calendar Editor)');
-                }
-                
-                if (calendarError.message.includes('notFound') || calendarError.response?.status === 404) {
-                    console.log('Calendar not found. The service account may not have access to the specified calendar.');
-                    console.log('Consider creating a shared calendar and granting access to the service account.');
-                }
-                
-                // Create booking without calendar integration
-                console.log('Creating booking without calendar integration due to calendar error');
-                await firestore.collection(BOOKINGS_COLLECTION).doc(booking_id).set(bookingData);
-                
                 res.status(201).json({ 
-                    message: 'Booking created successfully (without calendar integration)', 
+                    message: 'Branch booking created successfully with dedicated calendar', 
                     booking_id,
-                    booking: {
-                        ...bookingData,
-                        background_color: getStatusBackgroundColor(status)
+                    booking: enhancedBookingData,
+                    calendar_event_id: calendarResponse?.data?.id || null,
+                    calendar_event_link: calendarResponse?.data?.htmlLink || null,
+                    calendar_details: {
+                        calendar_id: calendarId,
+                        calendar_name: branchCalendarName,
+                        calendar_created: calendarCreated,
+                        calendar_shared: calendarShared,
+                        sharing_details: sharingDetails
                     },
-                    calendar_created: false,
-                    calendar_error: calendarError.message,
                     estimated_total_cost: totalCost,
                     background_color: getStatusBackgroundColor(status),
                     client_details: clientDetails,
                     branch_details: branchDetails,
                     services_details: services
                 });
-                return;
-            }
 
-       
+            } else {
+                console.log('Branch booking not created in calendar API');
+                res.status(500).json({ error: 'Failed to create branch booking in calendar' });
+            }
+            
+        } catch (calendarError) {
+            console.error('Error creating branch calendar event:', {
+                error: calendarError.message,
+                status: calendarError.response?.status,
+                statusText: calendarError.response?.statusText,
+                details: calendarError.response?.data,
+                calendarId: calendarId,
+                branchName: branchDetails.name,
+                hasGoogleCredentials: !!(process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL)
+            });
+            
+            // Create booking without calendar integration
+            console.log('Creating branch booking without calendar integration due to calendar error');
+            await firestore.collection(BOOKINGS_COLLECTION).doc(booking_id).set(bookingData);
+            
+            res.status(201).json({ 
+                message: 'Branch booking created successfully (without calendar integration)', 
+                booking_id,
+                booking: {
+                    ...bookingData,
+                    background_color: getStatusBackgroundColor(status)
+                },
+                calendar_created: false,
+                calendar_error: calendarError.message,
+                estimated_total_cost: totalCost,
+                background_color: getStatusBackgroundColor(status),
+                client_details: clientDetails,
+                branch_details: branchDetails,
+                services_details: services
+            });
+            return;
+        }
+
     } catch (error) {
-        console.error('Error creating booking:', error);
-        res.status(500).json({ error: 'Failed to create booking' });
+        console.error('Error creating branch booking:', error);
+        res.status(500).json({ error: 'Failed to create branch booking' });
     }
 });
 
@@ -746,6 +1081,8 @@ router.get('/getBookingsByDateRange', async (req, res) => {
 // Test endpoint for calendar setup and verification
 router.get('/test-calendar-setup', async (req, res) => {
     try {
+        const { branch_name = 'Test Branch' } = req.query; // Allow testing with specific branch name
+        
         const scopes = [
             'https://www.googleapis.com/auth/calendar',
             'https://www.googleapis.com/auth/calendar.events'
@@ -760,7 +1097,7 @@ router.get('/test-calendar-setup', async (req, res) => {
         const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
         
         // Test calendar access and setup
-        const calendarId = await getBookingCalendarId(calendar);
+        const calendarId = await getBookingCalendarId(calendar, branch_name);
         
         // Try to create a test event
         const testEvent = {
@@ -787,11 +1124,23 @@ router.get('/test-calendar-setup', async (req, res) => {
             eventId: testEventResponse.data.id
         });
         
+        // Test calendar sharing with master_admin users
+        const sharingResult = await shareCalendarWithMasterAdmins(calendar, calendarId, branch_name);
+        
         res.status(200).json({
             message: 'Calendar setup successful!',
+            branchName: branch_name,
             calendarId: calendarId,
+            calendarName: `${branch_name} - Bookings Calendar`,
             testEventCreated: true,
             testEventCleaned: true,
+            calendarSharing: {
+                successful: sharingResult.shared,
+                count: sharingResult.count,
+                emails: sharingResult.emails,
+                failed: sharingResult.failed || [],
+                total_attempts: sharingResult.total_attempts || 0
+            },
             credentials: {
                 hasGoogleEmail: !!(process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL),
                 hasPrivateKey: !!(process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)
@@ -900,6 +1249,166 @@ router.get('/test-calendar-auth', async (req, res) => {
                 format_looks_valid: accessToken && accessToken.length >= 10,
                 length: accessToken?.length || 0
             }
+        });
+    }
+}); 
+
+// Endpoint to manually share existing calendars with master_admin users
+router.post('/share-calendar-with-admins', async (req, res) => {
+    try {
+        const { branch_name } = req.body;
+        
+        if (!branch_name) {
+            return res.status(400).json({ 
+                error: 'branch_name is required in request body' 
+            });
+        }
+        
+        const scopes = [
+            'https://www.googleapis.com/auth/calendar',
+            'https://www.googleapis.com/auth/calendar.events'
+        ];
+        
+        const oauth2Client = new google.auth.JWT({
+            email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
+            key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
+            scopes,
+        });
+        
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+        
+        // Get the calendar ID for the specified branch
+        const calendarId = await getBookingCalendarId(calendar, branch_name);
+        
+        // Share the calendar with master_admin users
+        const sharingResult = await shareCalendarWithMasterAdmins(calendar, calendarId, branch_name);
+        
+        res.status(200).json({
+            message: `Calendar sharing process completed for ${branch_name}`,
+            branchName: branch_name,
+            calendarId: calendarId,
+            calendarName: `${branch_name} - Bookings Calendar`,
+            sharing: {
+                successful: sharingResult.shared,
+                count: sharingResult.count,
+                emails: sharingResult.emails,
+                failed: sharingResult.failed || [],
+                total_attempts: sharingResult.total_attempts || 0
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error sharing calendar with admins:', error);
+        res.status(500).json({
+            error: 'Failed to share calendar with master_admin users',
+            details: error.message,
+            suggestions: [
+                'Verify Google service account credentials are correct',
+                'Ensure Calendar API is enabled in Google Cloud Console',
+                'Check that service account has Calendar Editor role',
+                'Verify master_admin accounts exist in the database'
+            ]
+        });
+    }
+}); 
+
+// Endpoint to share calendars for all branches with master_admin users
+router.post('/share-all-calendars-with-admins', async (req, res) => {
+    try {
+        const scopes = [
+            'https://www.googleapis.com/auth/calendar',
+            'https://www.googleapis.com/auth/calendar.events'
+        ];
+        
+        const oauth2Client = new google.auth.JWT({
+            email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
+            key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
+            scopes,
+        });
+        
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+        
+        // Get all branches from database
+        const branchesSnapshot = await firestore.collection('branches').get();
+        const branches = [];
+        branchesSnapshot.forEach(doc => {
+            const branchData = doc.data();
+            if (branchData.name) {
+                branches.push({
+                    id: doc.id,
+                    name: branchData.name
+                });
+            }
+        });
+        
+        if (branches.length === 0) {
+            return res.status(404).json({
+                message: 'No branches found in database',
+                branches_processed: 0
+            });
+        }
+        
+        console.log(`Found ${branches.length} branches to process for calendar sharing`);
+        
+        // Process each branch
+        const results = [];
+        for (const branch of branches) {
+            try {
+                console.log(`Processing calendar sharing for branch: ${branch.name}`);
+                
+                // Get or create calendar for this branch
+                const calendarId = await getBookingCalendarId(calendar, branch.name);
+                
+                // Share calendar with master_admin users
+                const sharingResult = await shareCalendarWithMasterAdmins(calendar, calendarId, branch.name);
+                
+                results.push({
+                    branchId: branch.id,
+                    branchName: branch.name,
+                    calendarId: calendarId,
+                    sharing: sharingResult,
+                    success: true
+                });
+                
+            } catch (branchError) {
+                console.error(`Error processing branch ${branch.name}:`, branchError.message);
+                results.push({
+                    branchId: branch.id,
+                    branchName: branch.name,
+                    error: branchError.message,
+                    success: false
+                });
+            }
+        }
+        
+        // Calculate summary statistics
+        const successfulBranches = results.filter(r => r.success);
+        const failedBranches = results.filter(r => !r.success);
+        const totalSharedEmails = successfulBranches.reduce((sum, r) => sum + (r.sharing?.count || 0), 0);
+        
+        res.status(200).json({
+            message: 'Bulk calendar sharing process completed',
+            summary: {
+                total_branches: branches.length,
+                successful_branches: successfulBranches.length,
+                failed_branches: failedBranches.length,
+                total_admin_emails_shared: totalSharedEmails
+            },
+            results: results
+        });
+        
+    } catch (error) {
+        console.error('Error in bulk calendar sharing:', error);
+        res.status(500).json({
+            error: 'Failed to share calendars with master_admin users',
+            details: error.message,
+            suggestions: [
+                'Verify Google service account credentials are correct',
+                'Ensure Calendar API is enabled in Google Cloud Console',
+                'Check that service account has Calendar Editor role',
+                'Verify master_admin accounts exist in the database',
+                'Ensure branches collection exists and has valid data'
+            ]
         });
     }
 }); 
