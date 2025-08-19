@@ -463,15 +463,40 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
       });
     }
 
-    // Get existing clients for duplicate checking
+    // Get existing client emails for duplicate checking (optimized for large datasets)
     const clientsRef = admin.firestore().collection(CLIENTS_COLLECTION);
-    const existingClientsSnapshot = await clientsRef.get();
+    console.log('Loading existing client emails for duplicate checking...');
     
     const existingEmails = new Set();
-    existingClientsSnapshot.docs.forEach(doc => {
-      const client = doc.data();
-      existingEmails.add(client.email.toLowerCase().trim());
-    });
+    let lastDoc = null;
+    let hasMore = true;
+    const batchSize = 50; // Process existing clients in batches
+    
+    while (hasMore) {
+      let query = clientsRef.select('email').limit(batchSize);
+      
+      if (lastDoc) {
+        query = query.startAfter(lastDoc);
+      }
+      
+      const snapshot = await query.get();
+      
+      if (snapshot.empty) {
+        hasMore = false;
+      } else {
+        snapshot.docs.forEach(doc => {
+          const client = doc.data();
+          if (client.email) {
+            existingEmails.add(client.email.toLowerCase().trim());
+          }
+        });
+        
+        lastDoc = snapshot.docs[snapshot.docs.length - 1];
+        hasMore = snapshot.docs.length === batchSize;
+      }
+    }
+    
+    console.log(`Loaded ${existingEmails.size} existing client emails for duplicate checking`);
 
     const results = {
       inserted: 0,
@@ -480,54 +505,66 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
       details: []
     };
 
-    // Process clients in batches for better performance
-    const batchSize = 50; // Process 50 clients at a time
-    const batches = [];
+    // Process clients using Firestore batch writes for better performance and reliability
+    const FIRESTORE_BATCH_LIMIT = 500; // Firestore batch write limit
+    const processingBatchSize = Math.min(FIRESTORE_BATCH_LIMIT, 50); // Use smaller batches for better control
     
-    for (let i = 0; i < clients.length; i += batchSize) {
-      batches.push(clients.slice(i, i + batchSize));
-    }
-
-    // Process each batch
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex];
+    // Pre-generate all client IDs to avoid conflicts
+    console.log(`Pre-generating ${clients.length} client IDs...`);
+    const allClientIds = await generateClientIdsBatch(clients.length);
+    
+    // Process clients in batches using Firestore batch writes
+    for (let batchStartIndex = 0; batchStartIndex < clients.length; batchStartIndex += processingBatchSize) {
+      const batchEndIndex = Math.min(batchStartIndex + processingBatchSize, clients.length);
+      const currentBatch = clients.slice(batchStartIndex, batchEndIndex);
+      const currentBatchNumber = Math.floor(batchStartIndex / processingBatchSize) + 1;
+      const totalBatches = Math.ceil(clients.length / processingBatchSize);
       
-      // Pre-generate client IDs for this batch to avoid conflicts
-      const batchClientIds = await generateClientIdsBatch(batch.length);
+      console.log(`Processing batch ${currentBatchNumber}/${totalBatches} (rows ${batchStartIndex + 1}-${batchEndIndex})...`);
       
-      const batchPromises = batch.map(async (row, batchItemIndex) => {
-        const globalIndex = batchIndex * batchSize + batchItemIndex;
+      // Create Firestore batch
+      const firestoreBatch = firestore.batch();
+      const batchResults = [];
+      let validClientsInBatch = 0;
+      
+      // Process each client in the current batch
+      for (let i = 0; i < currentBatch.length; i++) {
+        const row = currentBatch[i];
+        const globalIndex = batchStartIndex + i;
         const rowNumber = globalIndex + 2; // +2 because Excel/CSV is 1-indexed and we have headers
-        const clientId = batchClientIds[batchItemIndex]; // Use pre-generated ID
+        const clientId = allClientIds[globalIndex];
 
         try {
           // Validate required fields
           if (!row.fullname || !row.contactNo || !row.address || !row.email) {
-            return {
+            batchResults.push({
               row: rowNumber,
               status: 'error',
               message: 'Missing required fields'
-            };
+            });
+            continue;
           }
 
           // Validate email format
           const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
           if (!emailRegex.test(row.email.trim())) {
-            return {
+            batchResults.push({
               row: rowNumber,
               status: 'error',
               message: 'Invalid email format'
-            };
+            });
+            continue;
           }
 
           // Check for duplicates
           const email = row.email.toLowerCase().trim();
           if (existingEmails.has(email)) {
-            return {
+            batchResults.push({
               row: rowNumber,
               status: 'skipped',
               message: 'Client with this email already exists'
-            };
+            });
+            continue;
           }
           
           // Create client data
@@ -546,30 +583,63 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
             doc_type: 'CLIENTS'
           };
 
-          // Insert client
-          await clientsRef.doc(clientId).set(clientData);
+          // Add to Firestore batch
+          const clientRef = clientsRef.doc(clientId);
+          firestoreBatch.set(clientRef, clientData);
+          validClientsInBatch++;
           
           // Add to existing emails set to prevent duplicates within the same upload
           existingEmails.add(email);
           
-          return {
+          batchResults.push({
             row: rowNumber,
             status: 'inserted',
             message: 'Client created successfully',
             clientId: clientId
-          };
+          });
 
         } catch (error) {
-          return {
+          batchResults.push({
             row: rowNumber,
             status: 'error',
             message: error.message
-          };
+          });
         }
-      });
-
-      // Wait for all clients in this batch to complete
-      const batchResults = await Promise.all(batchPromises);
+      }
+      
+      // Commit the Firestore batch with retry mechanism
+      if (validClientsInBatch > 0) {
+        let retryCount = 0;
+        const maxRetries = 3;
+        let batchCommitted = false;
+        
+        while (!batchCommitted && retryCount < maxRetries) {
+          try {
+            await firestoreBatch.commit();
+            batchCommitted = true;
+            console.log(`✓ Firestore batch ${currentBatchNumber} committed successfully (${validClientsInBatch} clients)`);
+          } catch (batchError) {
+            retryCount++;
+            console.error(`✗ Firestore batch ${currentBatchNumber} failed (attempt ${retryCount}/${maxRetries}):`, batchError.message);
+            
+            if (retryCount >= maxRetries) {
+              // Mark all valid clients in this batch as errors
+              batchResults.forEach(result => {
+                if (result.status === 'inserted') {
+                  result.status = 'error';
+                  result.message = `Firestore batch write failed after ${maxRetries} attempts: ${batchError.message}`;
+                }
+              });
+              console.error(`✗ Batch ${currentBatchNumber} failed permanently after ${maxRetries} attempts`);
+            } else {
+              // Wait before retry with exponential backoff
+              const waitTime = Math.pow(2, retryCount) * 1000; // 2s, 4s, 8s
+              console.log(`⏳ Waiting ${waitTime}ms before retry...`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+          }
+        }
+      }
       
       // Process batch results
       batchResults.forEach(result => {
@@ -583,23 +653,67 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
         }
       });
       
-      console.log(`Completed batch ${batchIndex + 1}/${batches.length}: ${batchResults.filter(r => r.status === 'inserted').length} inserted, ${batchResults.filter(r => r.status === 'skipped').length} skipped, ${batchResults.filter(r => r.status === 'error').length} errors`);
+      const insertedCount = batchResults.filter(r => r.status === 'inserted').length;
+      const skippedCount = batchResults.filter(r => r.status === 'skipped').length;
+      const errorCount = batchResults.filter(r => r.status === 'error').length;
+      
+      console.log(`Completed batch ${currentBatchNumber}/${totalBatches}: ${insertedCount} inserted, ${skippedCount} skipped, ${errorCount} errors`);
+      
+      // Add a small delay between batches to avoid overwhelming Firestore
+      if (currentBatchNumber < totalBatches) {
+        await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
+      }
     }
 
-    res.status(200).json({
+    // Final response with comprehensive summary
+    const response = {
       message: 'File processing completed',
+      timestamp: new Date().toISOString(),
       summary: {
         totalRows: clients.length,
         inserted: results.inserted,
         skipped: results.skipped,
-        errors: results.errors
+        errors: results.errors,
+        successRate: `${((results.inserted / clients.length) * 100).toFixed(2)}%`
+      },
+      performance: {
+        batchSize: processingBatchSize,
+        totalBatches: Math.ceil(clients.length / processingBatchSize),
+        avgItemsPerBatch: (clients.length / Math.ceil(clients.length / processingBatchSize)).toFixed(2)
       },
       details: results.details
-    });
+    };
+    
+    console.log(`✅ Upload completed: ${results.inserted}/${clients.length} clients successfully processed (${response.summary.successRate})`);
+    
+    res.status(200).json(response);
 
   } catch (error) {
     console.error('Error processing uploaded file:', error);
-    res.status(500).json({ error: error.message });
+    
+    // Provide detailed error information for debugging
+    const errorResponse = {
+      error: error.message,
+      timestamp: new Date().toISOString(),
+      totalProcessed: results.inserted + results.skipped + results.errors,
+      summary: {
+        inserted: results.inserted,
+        skipped: results.skipped,
+        errors: results.errors
+      }
+    };
+    
+    // Include partial results if any processing was completed
+    if (results.details && results.details.length > 0) {
+      errorResponse.partialResults = {
+        lastProcessedRow: Math.max(...results.details.map(r => r.row)),
+        sampleErrors: results.details
+          .filter(r => r.status === 'error')
+          .slice(0, 5) // Show first 5 errors for debugging
+      };
+    }
+    
+    res.status(500).json(errorResponse);
   }
 });
 
