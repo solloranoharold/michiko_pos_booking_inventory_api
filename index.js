@@ -16,6 +16,7 @@ const expensesRouter = require('./routers/expenses');
 const discountRouter = require('./routers/discount');
 const paymentMethodsRouter = require('./routers/paymentMethods');
 const bookingRouter = require('./routers/booking');
+const timeSlotRouter = require('./routers/timeSlot');
 const requireAuthHeader = require('./authMiddleware');
 const verifyToken = require('./verifyToken');
 
@@ -102,6 +103,7 @@ app.use('/api/expenses', expensesRouter);
 app.use('/api/discounts', discountRouter);
 app.use('/api/payment-methods', paymentMethodsRouter);
 app.use('/api/bookings', bookingRouter);
+app.use('/api/time-slots', timeSlotRouter);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {

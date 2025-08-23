@@ -53,7 +53,28 @@ Stores customer/client information.
 ## Suggested Additional Collections
 
 ### 3. `bookings` Collection (Recommended)
-For storing booking/appointment information.
+For storing booking/appointment information with Google Calendar integration and color-coded statuses.
+
+**Features:**
+- **Google Calendar Integration**: Automatic calendar event creation and updates
+- **Color-Coded Statuses**: Visual distinction of booking statuses in calendar
+- **Branch-Specific Calendars**: Dedicated calendars for each branch
+- **Real-time Updates**: Calendar events update automatically when booking status changes
+
+**Calendar Background Color System:**
+The system automatically assigns **full background colors** to calendar events based on booking status:
+
+| Status | Background Color | Description |
+|--------|------------------|-------------|
+| `scheduled` | Light Blue | New appointments |
+| `confirmed` | Light Green | Confirmed appointments |
+| `pending` | Light Orange | Awaiting confirmation |
+| `cancelled` | Light Red | Cancelled appointments |
+| `completed` | Light Purple | Completed services |
+| `no-show` | Light Gray | Missed appointments |
+| `rescheduled` | Light Cyan | Changed appointments |
+
+**Document Structure:**
 
 **Document Structure:**
 ```json
@@ -137,6 +158,39 @@ For storing payment and transaction history.
 
 ### Delete Service Product
 - Endpoint: `DELETE /deleteServiceProduct/:id`
+
+## Testing Calendar Color System
+
+The system includes a comprehensive test endpoint to verify the calendar color functionality:
+
+### Test Calendar Colors
+```bash
+# Test with default status (scheduled)
+GET /api/bookings/test-calendar-colors
+
+# Test with specific status
+GET /api/bookings/test-calendar-colors?status=confirmed
+
+# Test with different statuses
+GET /api/bookings/test-calendar-colors?status=cancelled
+GET /api/bookings/test-calendar-colors?status=completed
+```
+
+### Test Calendar Setup
+```bash
+# Test calendar setup for a specific branch
+GET /api/bookings/test-calendar-setup?branch_name=Test Branch
+```
+
+### Background Color System Features
+- **25+ Status Types**: Comprehensive coverage of booking scenarios
+- **Full Background Colors**: Entire event backgrounds are colored (not just small dots)
+- **Automatic Color Assignment**: Background colors are automatically applied based on status
+- **Enhanced Event Descriptions**: Status and color information added to event descriptions
+- **Fallback Handling**: Unknown statuses default to light blue background
+- **Real-time Updates**: Calendar background colors update when booking status changes
+
+For detailed information about the calendar color system, see [CALENDAR_COLOR_SYSTEM.md](./CALENDAR_COLOR_SYSTEM.md).
 
 ## Setup Instructions
 

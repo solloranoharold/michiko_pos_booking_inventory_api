@@ -1964,4 +1964,120 @@ router.get('/commissions/stats', async (req, res) => {
   }
 });
 
+// ==================== GET SERVICES DATA BY BRANCH ====================
+
+// Get services data based on branch and service IDs
+router.get('/clientSelectedServices/:branchId', async (req, res) => {
+  try {
+    const { branchId } = req.params;
+    const { service_ids = [] } = req.query;
+    console.log(service_ids ,'service_ids')
+    if (!branchId) {
+      return res.status(400).json({
+        error: 'Branch ID is required'
+      });
+    }
+
+    let queryRef = firestore.collection('services')
+      .where('branch_id', '==', branchId)
+      .where('status', '==', 'active');
+
+    const snapshot = await queryRef.get();
+    let services = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: data.id,
+        name: data.name,
+        description: data.description,
+        category: data.category,
+        price: data.price,
+        duration: data.duration,
+        status: data.status,
+        type: 'services',
+        collection: 'services'
+      };
+    });
+
+    // If service_ids are provided, filter to only those services
+    if (service_ids && Array.isArray(service_ids) && service_ids.length > 0) {
+      services = services.filter(service => service_ids.includes(service.id));
+    }
+    console.log(services.length ,'services' , service_ids.length)
+    // Get branch name
+    const branchName = await getBranchNameById(branchId);
+
+    res.status(200).json({
+      branch_id: branchId,
+      branch_name: branchName,
+      total_services: services.length,  
+      services: services
+    });
+  } catch (error) {
+    console.error('Error fetching services by branch:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get specific services by IDs within a branch
+router.post('/services-by-ids/:branchId', async (req, res) => {
+  try {
+    const { branchId } = req.params;
+    const { service_ids = [] } = req.body;
+
+    if (!branchId) {
+      return res.status(400).json({
+        error: 'Branch ID is required'
+      });
+    }
+
+    if (!service_ids || !Array.isArray(service_ids) || service_ids.length === 0) {
+      return res.status(400).json({
+        error: 'Service IDs array is required'
+      });
+    }
+
+    // Fetch services by IDs and filter by branch
+    const services = [];
+    for (const serviceId of service_ids) {
+      try {
+        const serviceDoc = await firestore.collection('services').doc(serviceId).get();
+        if (serviceDoc.exists) {
+          const serviceData = serviceDoc.data();
+          // Only include services that belong to the specified branch and are active
+          if (serviceData.branch_id === branchId && serviceData.status === 'active') {
+            services.push({
+              id: serviceData.id,
+              name: serviceData.name,
+              description: serviceData.description,
+              category: serviceData.category,
+              price: serviceData.price,
+              duration: serviceData.duration,
+              status: serviceData.status,
+              type: 'service',
+              collection: 'services'
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`Error fetching service ${serviceId}:`, error);
+        // Continue with other services
+      }
+    }
+
+    // Get branch name
+    const branchName = await getBranchNameById(branchId);
+
+    res.status(200).json({
+      branch_id: branchId,
+      branch_name: branchName,
+      requested_service_ids: service_ids,
+      found_services: services.length,
+      services: services
+    });
+  } catch (error) {
+    console.error('Error fetching services by IDs:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;

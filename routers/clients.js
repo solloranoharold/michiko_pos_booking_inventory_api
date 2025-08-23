@@ -11,6 +11,29 @@ const router = express.Router();
 const firestore = admin.firestore();
 const CLIENTS_COLLECTION = 'clients';
 
+// Configuration constants for large uploads
+const UPLOAD_CONFIG = {
+  // Batch processing settings
+  FIRESTORE_BATCH_LIMIT: 500, // Firestore's maximum batch size
+  DEFAULT_BATCH_SIZE: 200,     // Default batch size for regular uploads
+  LARGE_BATCH_SIZE: 300,       // Batch size for large uploads (10k+ records)
+  
+  // Timing settings
+  BATCH_DELAY_MS: 50,          // Delay between batches (regular uploads)
+  LARGE_BATCH_DELAY_MS: 25,    // Delay between batches (large uploads)
+  
+  // Retry settings
+  MAX_RETRIES: 3,              // Maximum retry attempts for failed batches
+  RETRY_BACKOFF_BASE: 2000,    // Base delay for retry backoff (2 seconds)
+  
+  // Memory management
+  MAX_MEMORY_USAGE_MB: 100,    // Maximum memory usage before forcing garbage collection
+  PROGRESS_UPDATE_INTERVAL: 100 // Update progress every N records
+};
+
+// Progress tracking for large uploads
+const uploadProgress = new Map();
+
 // Function to generate unique client ID
 async function generateClientId() {
   try {
@@ -67,7 +90,52 @@ async function generateClientIdsBatch(count) {
 router.get('/', (req, res) => {
   res.send('Hello Clients');
 });
+router.post('/registerClientPublic', async (req, res) => {
+  try {
+    const { fullname, contactNo, address, email, status, updated_by, notes, social_media } = req.body;
+    // Validate required fields
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+    if (!updated_by) {
+      return res.status(400).json({ error: 'Updated by field is required' });
+    }
+    
+    // Generate unique client ID
+    const clientId = await generateClientId();
+    
+    const clientRef = firestore.collection(CLIENTS_COLLECTION).doc(clientId);
+    const clientSnap = await clientRef.get();
+    if (clientSnap.exists) {
+      return res.status(409).json({ error: 'Client with this ID already exists' });
+    }
+    
+    const dateCreated = new Date().toISOString();
+    const dateUpdated = new Date().toISOString();
+    const clientData = { 
+      clientId, 
+      fullname, 
+      contactNo, 
+      address, 
+      email, 
+      dateCreated, 
+      dateUpdated, 
+      status, 
+      updated_by, 
+      notes: notes || [],
+      social_media: social_media || {},
+      doc_type: 'CLIENTS' 
+    };
 
+
+    console.log(clientData , 'clientData')
+    await clientRef.set(clientData);
+    // res.status(201).json({ id: clientId, ...clientData });
+    return res.status(200).json({ message: 'Client registered successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 // Create a new client (email as primary key)
 router.post('/insertClient', async (req, res) => {
   try {
@@ -185,13 +253,28 @@ router.get('/getClients', async (req, res) => {
 // Get a single client by email
 router.get('/getEmailClient/:email', async (req, res) => {
   try {
-    const clientRef = firestore.collection(CLIENTS_COLLECTION).doc(req.params.email);
-    const clientSnap = await clientRef.get();
-    if (!clientSnap.exists) {
-      return res.status(404).json({ error: 'Client not found' });
+    const email = req.params.email;
+    console.log('Searching for client with email:', email);
+    
+    // Query by email field instead of using email as document ID
+    const querySnapshot = await firestore.collection(CLIENTS_COLLECTION)
+      .where('email', '==', email)
+      .limit(1)
+      .get();
+    
+    if (querySnapshot.empty) {
+      console.log('No client found with email:', email);
+      return res.status(200).json({ data: null, message: 'Client not found' });
     }
-    res.json({ id: clientSnap.id, ...clientSnap.data() });
+    
+    const clientDoc = querySnapshot.docs[0];
+    const clientData = clientDoc.data();
+    clientData.role = 'client';
+    
+    console.log('Client found:', clientData.clientId);
+    return res.status(200).json({ data: [clientData] });
   } catch (error) {
+    console.error('Error fetching client by email:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -402,28 +485,22 @@ router.get('/downloadExcelTemplate', (req, res) => {
   }
 });
 
-// Upload Excel/CSV file to insert clients
+// Intelligent upload function that automatically optimizes based on dataset size
 router.post('/uploadClients', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    // Get updated_by from query parameters or form body (query params take priority)
-    // const updated_by = req.query.updated_by || req.body.updated_by;
-    // if (!updated_by) {
-    //   return res.status(400).json({ 
-    //     error: 'updated_by is required. Provide it as a query parameter (?updated_by=xxx) or in the form body' 
-    //   });
-    // }
-
     const fileBuffer = req.file.buffer;
     const fileExtension = path.extname(req.file.originalname).toLowerCase();
     let clients = [];
 
+    console.log(`🔍 Starting file processing...`);
+    console.log(`📁 File: ${req.file.originalname}, Size: ${(fileBuffer.length / 1024).toFixed(2)}KB, Type: ${fileExtension}`);
+
     // Parse file based on extension
     if (fileExtension === '.csv') {
-      // Parse CSV file from buffer
       const results = [];
       await new Promise((resolve, reject) => {
         const stream = require('stream');
@@ -438,12 +515,13 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
           .on('error', (error) => reject(error));
       });
       clients = results;
+      console.log(`📊 CSV parsed: ${clients.length} rows`);
     } else if (fileExtension === '.xlsx' || fileExtension === '.xls') {
-      // Parse Excel file from buffer
       const workbook = xlsx.read(fileBuffer, { type: 'buffer' });
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
       clients = xlsx.utils.sheet_to_json(worksheet);
+      console.log(`📊 Excel parsed: ${clients.length} rows from sheet '${sheetName}'`);
     } else {
       return res.status(400).json({ error: 'Unsupported file format' });
     }
@@ -452,10 +530,19 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No data found in the uploaded file' });
     }
 
+    // Log first few rows for debugging
+    console.log(`🔍 Sample data (first 3 rows):`, clients.slice(0, 3));
+
     // Validate required columns
     const requiredColumns = ['fullname', 'contactNo', 'address', 'email'];
     const firstRow = clients[0];
     const missingColumns = requiredColumns.filter(col => !(col in firstRow));
+    
+    console.log(`🔍 Column validation:`, {
+      foundColumns: Object.keys(firstRow),
+      requiredColumns: requiredColumns,
+      missingColumns: missingColumns
+    });
     
     if (missingColumns.length > 0) {
       return res.status(400).json({ 
@@ -463,40 +550,21 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
       });
     }
 
-    // Get existing client emails for duplicate checking (optimized for large datasets)
-    const clientsRef = admin.firestore().collection(CLIENTS_COLLECTION);
-    console.log('Loading existing client emails for duplicate checking...');
+    // Intelligent configuration based on dataset size
+    const isLargeDataset = clients.length > 1000;
+    const processingBatchSize = Math.min(
+      UPLOAD_CONFIG.FIRESTORE_BATCH_LIMIT, 
+      isLargeDataset ? UPLOAD_CONFIG.LARGE_BATCH_SIZE : UPLOAD_CONFIG.DEFAULT_BATCH_SIZE
+    );
+    const batchDelay = isLargeDataset ? UPLOAD_CONFIG.LARGE_BATCH_DELAY_MS : UPLOAD_CONFIG.BATCH_DELAY_MS;
     
-    const existingEmails = new Set();
-    let lastDoc = null;
-    let hasMore = true;
-    const batchSize = 50; // Process existing clients in batches
-    
-    while (hasMore) {
-      let query = clientsRef.select('email').limit(batchSize);
-      
-      if (lastDoc) {
-        query = query.startAfter(lastDoc);
-      }
-      
-      const snapshot = await query.get();
-      
-      if (snapshot.empty) {
-        hasMore = false;
-      } else {
-        snapshot.docs.forEach(doc => {
-          const client = doc.data();
-          if (client.email) {
-            existingEmails.add(client.email.toLowerCase().trim());
-          }
-        });
-        
-        lastDoc = snapshot.docs[snapshot.docs.length - 1];
-        hasMore = snapshot.docs.length === batchSize;
-      }
-    }
-    
-    console.log(`Loaded ${existingEmails.size} existing client emails for duplicate checking`);
+    console.log(`🚀 Processing ${clients.length} clients with ${isLargeDataset ? 'large dataset' : 'standard'} optimization...`);
+    console.log(`⚙️ Configuration: Batch size: ${processingBatchSize}, Delay: ${batchDelay}ms`);
+
+    // Pre-generate all client IDs to avoid conflicts
+    console.log(`🆔 Pre-generating ${clients.length} client IDs...`);
+    const allClientIds = await generateClientIdsBatch(clients.length);
+    console.log(`✅ Generated IDs: ${allClientIds.slice(0, 5).join(', ')}...`);
 
     const results = {
       inserted: 0,
@@ -505,13 +573,8 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
       details: []
     };
 
-    // Process clients using Firestore batch writes for better performance and reliability
-    const FIRESTORE_BATCH_LIMIT = 500; // Firestore batch write limit
-    const processingBatchSize = Math.min(FIRESTORE_BATCH_LIMIT, 50); // Use smaller batches for better control
-    
-    // Pre-generate all client IDs to avoid conflicts
-    console.log(`Pre-generating ${clients.length} client IDs...`);
-    const allClientIds = await generateClientIdsBatch(clients.length);
+    // Create a Set to track emails within the current upload to prevent duplicates within the same file
+    const currentUploadEmails = new Set();
     
     // Process clients in batches using Firestore batch writes
     for (let batchStartIndex = 0; batchStartIndex < clients.length; batchStartIndex += processingBatchSize) {
@@ -520,7 +583,7 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
       const currentBatchNumber = Math.floor(batchStartIndex / processingBatchSize) + 1;
       const totalBatches = Math.ceil(clients.length / processingBatchSize);
       
-      console.log(`Processing batch ${currentBatchNumber}/${totalBatches} (rows ${batchStartIndex + 1}-${batchEndIndex})...`);
+      console.log(`\n📦 Processing batch ${currentBatchNumber}/${totalBatches} (rows ${batchStartIndex + 1}-${batchEndIndex})...`);
       
       // Create Firestore batch
       const firestoreBatch = firestore.batch();
@@ -535,61 +598,126 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
         const clientId = allClientIds[globalIndex];
 
         try {
-          // Validate required fields
-          if (!row.fullname || !row.contactNo || !row.address || !row.email) {
+          // Debug row data with space analysis
+          if (i < 3) { // Log first 3 rows of each batch for debugging
+            console.log(`🔍 Row ${rowNumber} data:`, {
+              fullname: `"${row.fullname}" (length: ${row.fullname ? row.fullname.length : 0})`,
+              contactNo: `"${row.contactNo}" (length: ${row.contactNo ? row.contactNo.length : 0})`,
+              address: `"${row.address}" (length: ${row.address ? row.address.length : 0})`,
+              email: `"${row.email}" (length: ${row.email ? row.email.length : 0})`,
+              status: `"${row.status}" (length: ${row.status ? row.status.length : 0})`
+            });
+            
+            // Show hidden characters and spaces
+            if (row.email) {
+              console.log(`🔍 Email analysis for row ${rowNumber}:`);
+              console.log(`  Raw: "${row.email}"`);
+              console.log(`  Length: ${row.email.length}`);
+              console.log(`  Char codes: [${Array.from(row.email).map(c => c.charCodeAt(0)).join(', ')}]`);
+              console.log(`  Trimmed: "${row.email.trim()}"`);
+              console.log(`  Trimmed length: ${row.email.trim().length}`);
+            }
+          }
+
+          // Clean and validate all fields with comprehensive space handling
+          const cleanFullname = row.fullname ? row.fullname.trim().replace(/\s+/g, ' ') : '';
+          const cleanContactNo = row.contactNo ? row.contactNo : '';
+          const cleanAddress = row.address ? row.address.trim().replace(/\s+/g, ' ') : '';
+          const cleanEmail = row.email ? row.email.trim().replace(/\s+/g, '') : ''; // Remove ALL spaces from email
+          const cleanStatus = row.status ? row.status.trim() : 'active';
+
+          // Validate required fields after cleaning
+          if (!cleanFullname || !cleanContactNo || !cleanAddress || !cleanEmail) {
+            const missingFields = [];
+            if (!cleanFullname) missingFields.push('fullname');
+            if (!cleanContactNo) missingFields.push('contactNo');
+            if (!cleanAddress) missingFields.push('address');
+            if (!cleanEmail) missingFields.push('email');
+            
+            console.log(`❌ Row ${rowNumber}: Missing fields after cleaning: ${missingFields.join(', ')}`);
+            console.log(`  Original: fullname="${row.fullname}", contactNo="${row.contactNo}", address="${row.address}", email="${row.email}"`);
+            console.log(`  Cleaned: fullname="${cleanFullname}", contactNo="${cleanContactNo}", address="${cleanAddress}", email="${cleanEmail}"`);
+            
             batchResults.push({
               row: rowNumber,
               status: 'error',
-              message: 'Missing required fields'
+              message: `Missing required fields after cleaning: ${missingFields.join(', ')}`
             });
             continue;
           }
 
-          // Validate email format
+          // Validate email format after cleaning
           const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-          if (!emailRegex.test(row.email.trim())) {
+          if (!emailRegex.test(cleanEmail)) {
+            console.log(`❌ Row ${rowNumber}: Invalid email format after cleaning`);
+            console.log(`  Original: "${row.email}"`);
+            console.log(`  Cleaned: "${cleanEmail}"`);
+            console.log(`  Regex test: ${emailRegex.test(cleanEmail)}`);
+            
             batchResults.push({
               row: rowNumber,
               status: 'error',
-              message: 'Invalid email format'
+              message: `Invalid email format: "${cleanEmail}" (original: "${row.email}")`
             });
             continue;
           }
 
-          // Check for duplicates
-          const email = row.email.toLowerCase().trim();
-          if (existingEmails.has(email)) {
+          const finalEmail = cleanEmail.toLowerCase();
+          
+          // Check for duplicates within the current upload first (fastest)
+          if (currentUploadEmails.has(finalEmail)) {
+            console.log(`⚠️ Row ${rowNumber}: Duplicate email within upload: "${finalEmail}"`);
             batchResults.push({
               row: rowNumber,
               status: 'skipped',
-              message: 'Client with this email already exists'
+              message: 'Duplicate email within the same upload file'
             });
             continue;
           }
           
-          // Create client data
+          // Check for duplicates in database (only if not already in current upload)
+          console.log(`🔍 Row ${rowNumber}: Checking database for duplicate email: "${finalEmail}"`);
+          const duplicateCheck = await firestore
+            .collection(CLIENTS_COLLECTION)
+            .where('email', '==', finalEmail)
+            .limit(1)
+            .get();
+          
+          if (!duplicateCheck.empty) {
+            console.log(`⚠️ Row ${rowNumber}: Email already exists in database: "${finalEmail}"`);
+            batchResults.push({
+              row: rowNumber,
+              status: 'skipped',
+              message: 'Client with this email already exists in database'
+            });
+            continue;
+          }
+          
+          // Create client data with cleaned values
           const dateCreated = new Date().toISOString();
           const dateUpdated = new Date().toISOString();
           
           const clientData = {
             clientId,
-            fullname: row.fullname.trim(),
-            contactNo: row.contactNo.trim(),
-            address: row.address.trim(),
-            email: email,
+            fullname: cleanFullname,
+            contactNo: cleanContactNo,
+            address: cleanAddress,
+            email: finalEmail,
             dateCreated,
             dateUpdated,
-            status: row.status ? row.status.trim() : 'active', // Default to 'active' if not provided
+            status: cleanStatus,
             doc_type: 'CLIENTS'
           };
 
           // Add to Firestore batch
-          const clientRef = clientsRef.doc(clientId);
+          const clientRef = firestore.collection(CLIENTS_COLLECTION).doc(clientId);
           firestoreBatch.set(clientRef, clientData);
           validClientsInBatch++;
           
-          // Add to existing emails set to prevent duplicates within the same upload
-          existingEmails.add(email);
+          // Add to current upload emails set to prevent duplicates within the same upload
+          currentUploadEmails.add(finalEmail);
+          
+          console.log(`✅ Row ${rowNumber}: Client prepared for insertion - ID: ${clientId}, Email: "${finalEmail}"`);
           
           batchResults.push({
             row: rowNumber,
@@ -599,6 +727,7 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
           });
 
         } catch (error) {
+          console.error(`💥 Row ${rowNumber}: Unexpected error:`, error);
           batchResults.push({
             row: rowNumber,
             status: 'error',
@@ -607,20 +736,24 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
         }
       }
       
+      console.log(`📊 Batch ${currentBatchNumber} summary: ${validClientsInBatch} valid clients ready for insertion`);
+      
       // Commit the Firestore batch with retry mechanism
       if (validClientsInBatch > 0) {
         let retryCount = 0;
-        const maxRetries = 3;
+        const maxRetries = UPLOAD_CONFIG.MAX_RETRIES;
         let batchCommitted = false;
+        
+        console.log(`💾 Committing batch ${currentBatchNumber} with ${validClientsInBatch} clients...`);
         
         while (!batchCommitted && retryCount < maxRetries) {
           try {
             await firestoreBatch.commit();
             batchCommitted = true;
-            console.log(`✓ Firestore batch ${currentBatchNumber} committed successfully (${validClientsInBatch} clients)`);
+            console.log(`✅ Firestore batch ${currentBatchNumber} committed successfully (${validClientsInBatch} clients)`);
           } catch (batchError) {
             retryCount++;
-            console.error(`✗ Firestore batch ${currentBatchNumber} failed (attempt ${retryCount}/${maxRetries}):`, batchError.message);
+            console.error(`❌ Firestore batch ${currentBatchNumber} failed (attempt ${retryCount}/${maxRetries}):`, batchError.message);
             
             if (retryCount >= maxRetries) {
               // Mark all valid clients in this batch as errors
@@ -630,15 +763,17 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
                   result.message = `Firestore batch write failed after ${maxRetries} attempts: ${batchError.message}`;
                 }
               });
-              console.error(`✗ Batch ${currentBatchNumber} failed permanently after ${maxRetries} attempts`);
+              console.error(`💥 Batch ${currentBatchNumber} failed permanently after ${maxRetries} attempts`);
             } else {
               // Wait before retry with exponential backoff
-              const waitTime = Math.pow(2, retryCount) * 1000; // 2s, 4s, 8s
+              const waitTime = Math.pow(2, retryCount) * (UPLOAD_CONFIG.RETRY_BACKOFF_BASE / 1000);
               console.log(`⏳ Waiting ${waitTime}ms before retry...`);
               await new Promise(resolve => setTimeout(resolve, waitTime));
             }
           }
         }
+      } else {
+        console.log(`⚠️ Batch ${currentBatchNumber}: No valid clients to commit`);
       }
       
       // Process batch results
@@ -657,11 +792,12 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
       const skippedCount = batchResults.filter(r => r.status === 'skipped').length;
       const errorCount = batchResults.filter(r => r.status === 'error').length;
       
-      console.log(`Completed batch ${currentBatchNumber}/${totalBatches}: ${insertedCount} inserted, ${skippedCount} skipped, ${errorCount} errors`);
+      console.log(`📈 Completed batch ${currentBatchNumber}/${totalBatches}: ${insertedCount} inserted, ${skippedCount} skipped, ${errorCount} errors`);
+      console.log(`📊 Running totals: ${results.inserted} inserted, ${results.skipped} skipped, ${results.errors} errors`);
       
       // Add a small delay between batches to avoid overwhelming Firestore
       if (currentBatchNumber < totalBatches) {
-        await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
+        await new Promise(resolve => setTimeout(resolve, batchDelay));
       }
     }
 
@@ -669,6 +805,12 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
     const response = {
       message: 'File processing completed',
       timestamp: new Date().toISOString(),
+      optimization: {
+        datasetSize: clients.length,
+        approach: isLargeDataset ? 'large_dataset_optimized' : 'standard_optimized',
+        batchSize: processingBatchSize,
+        batchDelay: batchDelay
+      },
       summary: {
         totalRows: clients.length,
         inserted: results.inserted,
@@ -677,45 +819,233 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
         successRate: `${((results.inserted / clients.length) * 100).toFixed(2)}%`
       },
       performance: {
-        batchSize: processingBatchSize,
         totalBatches: Math.ceil(clients.length / processingBatchSize),
-        avgItemsPerBatch: (clients.length / Math.ceil(clients.length / processingBatchSize)).toFixed(2)
+        avgItemsPerBatch: (clients.length / Math.ceil(clients.length / processingBatchSize)).toFixed(2),
+        estimatedProcessingTime: `${((clients.length / processingBatchSize) * batchDelay / 1000).toFixed(2)}s`
       },
       details: results.details
     };
     
-    console.log(`✅ Upload completed: ${results.inserted}/${clients.length} clients successfully processed (${response.summary.successRate})`);
+    console.log(`\n🎉 Upload completed: ${results.inserted}/${clients.length} clients successfully processed (${response.summary.successRate})`);
+    console.log(`📊 Used ${isLargeDataset ? 'large dataset' : 'standard'} optimization with ${processingBatchSize} batch size`);
+    console.log(`📋 Final results: ${results.inserted} inserted, ${results.skipped} skipped, ${results.errors} errors`);
     
     res.status(200).json(response);
 
   } catch (error) {
-    console.error('Error processing uploaded file:', error);
+    console.error('💥 Error processing uploaded file:', error);
     
     // Provide detailed error information for debugging
     const errorResponse = {
       error: error.message,
       timestamp: new Date().toISOString(),
-      totalProcessed: results.inserted + results.skipped + results.errors,
-      summary: {
-        inserted: results.inserted,
-        skipped: results.skipped,
-        errors: results.errors
-      }
+      stack: error.stack
     };
-    
-    // Include partial results if any processing was completed
-    if (results.details && results.details.length > 0) {
-      errorResponse.partialResults = {
-        lastProcessedRow: Math.max(...results.details.map(r => r.row)),
-        sampleErrors: results.details
-          .filter(r => r.status === 'error')
-          .slice(0, 5) // Show first 5 errors for debugging
-      };
-    }
     
     res.status(500).json(errorResponse);
   }
 });
+
+// Test endpoint to debug upload issues
+router.post('/testUpload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    console.log('🧪 TEST UPLOAD - Starting debug...');
+    console.log('📁 File details:', {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      bufferLength: req.file.buffer.length
+    });
+
+    const fileBuffer = req.file.buffer;
+    const fileExtension = path.extname(req.file.originalname).toLowerCase();
+    let clients = [];
+
+    // Parse file based on extension
+    if (fileExtension === '.csv') {
+      const results = [];
+      await new Promise((resolve, reject) => {
+        const stream = require('stream');
+        const readable = new stream.Readable();
+        readable.push(fileBuffer);
+        readable.push(null);
+        
+        readable
+          .pipe(csv())
+          .on('data', (data) => results.push(data))
+          .on('end', () => resolve())
+          .on('error', (error) => reject(error));
+      });
+      clients = results;
+      console.log('📊 CSV parsed successfully:', clients.length, 'rows');
+    } else if (fileExtension === '.xlsx' || fileExtension === '.xls') {
+      const workbook = xlsx.read(fileBuffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      clients = xlsx.utils.sheet_to_json(worksheet);
+      console.log('📊 Excel parsed successfully:', clients.length, 'rows from sheet:', sheetName);
+    } else {
+      return res.status(400).json({ error: 'Unsupported file format' });
+    }
+
+    if (clients.length === 0) {
+      return res.status(400).json({ error: 'No data found in the uploaded file' });
+    }
+
+    // Log detailed information about the data
+    console.log('🔍 First row data:', clients[0]);
+    console.log('🔍 All column names:', Object.keys(clients[0]));
+    console.log('🔍 Sample rows (first 3):', clients.slice(0, 3));
+
+    // Validate required columns
+    const requiredColumns = ['fullname', 'contactNo', 'address', 'email'];
+    const firstRow = clients[0];
+    const missingColumns = requiredColumns.filter(col => !(col in firstRow));
+    
+    console.log('🔍 Column validation:', {
+      foundColumns: Object.keys(firstRow),
+      requiredColumns: requiredColumns,
+      missingColumns: missingColumns,
+      hasAllRequired: missingColumns.length === 0
+    });
+
+    // Test a few rows for validation
+    const validationResults = [];
+    for (let i = 0; i < Math.min(5, clients.length); i++) {
+      const row = clients[i];
+      const rowNumber = i + 2; // +2 because Excel/CSV is 1-indexed and we have headers
+      
+      // Clean the data the same way as the main upload function
+      const cleanFullname = row.fullname ? row.fullname.trim().replace(/\s+/g, ' ') : '';
+      const cleanContactNo = row.contactNo ? row.contactNo.trim() : '';
+      const cleanAddress = row.address ? row.address.trim().replace(/\s+/g, ' ') : '';
+      const cleanEmail = row.email ? row.email.trim().replace(/\s+/g, '') : ''; // Remove ALL spaces from email
+      const cleanStatus = row.status ? row.status.trim() : 'active';
+      
+      const validation = {
+        row: rowNumber,
+        originalData: {
+          fullname: `"${row.fullname}" (length: ${row.fullname ? row.fullname.length : 0})`,
+          contactNo: `"${row.contactNo}" (length: ${row.contactNo ? row.contactNo.length : 0})`,
+          address: `"${row.address}" (length: ${row.address ? row.address.length : 0})`,
+          email: `"${row.email}" (length: ${row.email ? row.email.length : 0})`,
+          status: `"${row.status}" (length: ${row.status ? row.status.length : 0})`
+        },
+        cleanedData: {
+          fullname: `"${cleanFullname}" (length: ${cleanFullname.length})`,
+          contactNo: `"${cleanContactNo}" (length: ${cleanContactNo.length})`,
+          address: `"${cleanAddress}" (length: ${cleanAddress.length})`,
+          email: `"${cleanEmail}" (length: ${cleanEmail.length})`,
+          status: `"${cleanStatus}" (length: ${cleanStatus.length})`
+        },
+        issues: []
+      };
+
+      // Check required fields after cleaning
+      if (!cleanFullname) validation.issues.push('Missing fullname after cleaning');
+      if (!cleanContactNo) validation.issues.push('Missing contactNo after cleaning');
+      if (!cleanAddress) validation.issues.push('Missing address after cleaning');
+      if (!cleanEmail) validation.issues.push('Missing email after cleaning');
+
+      // Check email format after cleaning
+      if (cleanEmail) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(cleanEmail)) {
+          validation.issues.push(`Invalid email format after cleaning: "${cleanEmail}"`);
+        }
+      }
+
+      // Show email analysis for debugging
+      if (row.email) {
+        validation.emailAnalysis = {
+          raw: `"${row.email}"`,
+          length: row.email.length,
+          charCodes: Array.from(row.email).map(c => c.charCodeAt(0)),
+          trimmed: `"${row.email.trim()}"`,
+          trimmedLength: row.email.trim().length,
+          spacesRemoved: `"${cleanEmail}"`,
+          spacesRemovedLength: cleanEmail.length
+        };
+      }
+
+      validationResults.push(validation);
+    }
+
+    // Test Firestore connection
+    let firestoreTest = 'Not tested';
+    try {
+      const testQuery = await firestore.collection(CLIENTS_COLLECTION).limit(1).get();
+      firestoreTest = `Connected successfully. Collection has ${testQuery.size} documents.`;
+    } catch (error) {
+      firestoreTest = `Connection failed: ${error.message}`;
+    }
+
+    const response = {
+      message: 'Test upload completed',
+      timestamp: new Date().toISOString(),
+      fileInfo: {
+        name: req.file.originalname,
+        type: req.file.mimetype,
+        size: req.file.size,
+        extension: fileExtension
+      },
+      dataInfo: {
+        totalRows: clients.length,
+        columns: Object.keys(clients[0]),
+        missingRequiredColumns: missingColumns,
+        hasAllRequired: missingColumns.length === 0
+      },
+      validationResults: validationResults,
+      firestoreTest: firestoreTest,
+      sampleData: clients.slice(0, 3)
+    };
+
+    console.log('🧪 TEST UPLOAD - Debug complete');
+    res.status(200).json(response);
+
+  } catch (error) {
+    console.error('🧪 TEST UPLOAD - Error:', error);
+    res.status(500).json({ 
+      error: error.message, 
+      timestamp: new Date().toISOString(),
+      stack: error.stack
+    });
+  }
+});
+
+// Progress tracking endpoint for large uploads
+router.get('/uploadProgress/:uploadId', (req, res) => {
+  try {
+    const { uploadId } = req.params;
+    const progress = uploadProgress.get(uploadId);
+    
+    if (!progress) {
+      return res.status(404).json({ error: 'Upload progress not found' });
+    }
+    
+    res.status(200).json(progress);
+  } catch (error) {
+    console.error('Error getting upload progress:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Clean up completed upload progress (run periodically)
+setInterval(() => {
+  const now = Date.now();
+  const oneHour = 60 * 60 * 1000; // 1 hour in milliseconds
+  
+  for (const [uploadId, progress] of uploadProgress.entries()) {
+    if (progress.completed && (now - progress.lastUpdated) > oneHour) {
+      uploadProgress.delete(uploadId);
+      console.log(`Cleaned up completed upload progress: ${uploadId}`);
+    }
+  }
+}, 30 * 60 * 1000); // Clean up every 30 minutes
 
 // Update client notes with image uploads
 router.post('/updateClientNotes/:clientId', imageUpload.array('images', 10), async (req, res) => {

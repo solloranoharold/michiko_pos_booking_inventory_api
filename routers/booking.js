@@ -86,16 +86,131 @@ function getStatusBackgroundColor(status) {
 
 // Helper function to get calendar color ID based on status
 function getCalendarColorId(status) {
+    // Google Calendar Color ID mapping
+    // Color IDs 1-11 are the default Google Calendar colors
+    // Each color ID corresponds to a specific color in Google Calendar
     const colorMapping = {
-        'scheduled': '7',      // Blue
-        'confirmed': '10',     // Green
-        'pending': '5',        // Yellow
-        'cancelled': '11',     // Red
-        'completed': '9',      // Purple
-        'no-show': '8',        // Gray
-        'rescheduled': '6'     // Orange
+        // Primary booking statuses
+        'scheduled': '7',      // Blue - Default for new bookings
+        'confirmed': '10',     // Green - Confirmed appointments
+        'pending': '5',        // Yellow - Awaiting confirmation
+        'cancelled': '11',     // Red - Cancelled appointments
+        'completed': '9',      // Purple - Completed services
+        'no-show': '8',        // Gray - Client didn't show up
+        'rescheduled': '6',    // Orange - Rescheduled appointments
+        
+        // Additional statuses that might be used
+        'in-progress': '3',    // Teal - Service in progress
+        'waiting': '4',        // Pink - Client waiting
+        'late': '2',           // Red-Orange - Late arrival
+        'early': '1',          // Light Blue - Early arrival
+        'urgent': '11',        // Red - Urgent/emergency
+        'vip': '9',            // Purple - VIP client
+        'walk-in': '4',        // Pink - Walk-in appointments
+        'online': '6',         // Orange - Online bookings
+        'phone': '5',          // Yellow - Phone bookings
+        'referral': '3',       // Teal - Referral appointments
+        
+        // Payment-related statuses
+        'paid': '10',          // Green - Payment completed
+        'unpaid': '5',         // Yellow - Payment pending
+        'partial': '6',        // Orange - Partial payment
+        'refunded': '8',       // Gray - Refunded
+        
+        // Special statuses
+        'maintenance': '8',    // Gray - System maintenance
+        'holiday': '1',        // Light Blue - Holiday/closed
+        'training': '3',       // Teal - Staff training
+        'meeting': '7',        // Blue - Staff meetings
+        'break': '2'           // Red-Orange - Break time
     };
-    return colorMapping[status?.toLowerCase()] || '1'; // Default
+    
+    // Normalize status to lowercase and remove extra spaces
+    const normalizedStatus = status?.toLowerCase()?.trim();
+    
+    // Return mapped color ID or default to blue (ID: 7) for unknown statuses
+    return colorMapping[normalizedStatus] || '7';
+}
+
+// Helper function to get calendar color name for reference
+function getCalendarColorName(colorId) {
+    const colorNames = {
+        '1': 'Light Blue',
+        '2': 'Red-Orange', 
+        '3': 'Teal',
+        '4': 'Pink',
+        '5': 'Yellow',
+        '6': 'Orange',
+        '7': 'Blue',
+        '8': 'Gray',
+        '9': 'Purple',
+        '10': 'Green',
+        '11': 'Red'
+    };
+    return colorNames[colorId] || 'Unknown';
+}
+
+// Helper function to get enhanced calendar event with color information
+function getEnhancedCalendarEvent(eventData, status) {
+    const colorId = getCalendarColorId(status);
+    const colorName = getCalendarColorName(colorId);
+    
+    // Get custom color for full background (instead of just colorId dots)
+    const customColor = getCustomBackgroundColor(status);
+    
+    return {
+        ...eventData,
+        colorId: colorId, // Keep for fallback compatibility
+        // Use custom color for full background
+        color: customColor,
+        // Add color information to event description for better visibility
+        description: `${eventData.description || ''}\n\n📅 Status: ${status?.toUpperCase() || 'UNKNOWN'}\n🎨 Color: ${colorName} (ID: ${colorId})\n🌈 Background: ${customColor}`
+    };
+}
+
+// Helper function to get custom background colors for full event coloring
+function getCustomBackgroundColor(status) {
+    const customColors = {
+        // Primary booking statuses with full background colors
+        'scheduled': '#E3F2FD',     // Light Blue background
+        'confirmed': '#E8F5E8',     // Light Green background
+        'pending': '#FFF3E0',       // Light Orange background
+        'cancelled': '#FFEBEE',     // Light Red background
+        'completed': '#F3E5F5',     // Light Purple background
+        'no-show': '#FAFAFA',       // Light Gray background
+        'rescheduled': '#E1F5FE',   // Light Cyan background
+        
+        // Additional statuses
+        'in-progress': '#E0F2F1',   // Light Teal background
+        'waiting': '#FCE4EC',       // Light Pink background
+        'late': '#FFE0B2',          // Light Red-Orange background
+        'early': '#E1F5FE',         // Light Blue background
+        'urgent': '#FFCDD2',        // Light Red background
+        'vip': '#F3E5F5',           // Light Purple background
+        'walk-in': '#FCE4EC',       // Light Pink background
+        'online': '#FFF3E0',        // Light Orange background
+        'phone': '#FFF3E0',         // Light Yellow background
+        'referral': '#E0F2F1',      // Light Teal background
+        
+        // Payment-related statuses
+        'paid': '#E8F5E8',          // Light Green background
+        'unpaid': '#FFF3E0',        // Light Yellow background
+        'partial': '#FFF3E0',       // Light Orange background
+        'refunded': '#FAFAFA',      // Light Gray background
+        
+        // Special statuses
+        'maintenance': '#FAFAFA',    // Light Gray background
+        'holiday': '#E1F5FE',       // Light Blue background
+        'training': '#E0F2F1',      // Light Teal background
+        'meeting': '#E3F2FD',       // Light Blue background
+        'break': '#FFE0B2'          // Light Red-Orange background
+    };
+    
+    // Normalize status to lowercase and remove extra spaces
+    const normalizedStatus = status?.toLowerCase()?.trim();
+    
+    // Return custom color or default to light blue for unknown statuses
+    return customColors[normalizedStatus] || '#E3F2FD';
 }
 
 // Helper functions to fetch related data for calendar events
@@ -492,6 +607,7 @@ router.post('/createBookingperBranch', async (req, res) => {
             .where('branch_id', '==', branch_id)
             .where('date', '==', date)
             .where('time', '==', time)
+            .where('status', '==', 'scheduled')
             .get();
 
         if (!duplicateQuery.empty) {
@@ -664,7 +780,7 @@ Branch Calendar: ${branchCalendarName}
 Created: ${created_at}
             `.trim();
 
-            const event = {
+            const baseEvent = {
                 summary: `${clientDetails.name} - ${branchDetails.name}${services.length > 0 ? ` (${services.map(s => s.name).join(', ')})` : ''}`,
                 description: eventDescription,
                 start: { 
@@ -683,7 +799,6 @@ Created: ${created_at}
                         { method: 'popup', minutes: 30 }       // 30 minutes before
                     ]
                 },
-                colorId: getCalendarColorId(status),
                 visibility: 'public',
                 extendedProperties: {
                     private: {
@@ -698,6 +813,9 @@ Created: ${created_at}
                     }
                 }
             };
+
+            // Apply enhanced calendar event with color coding
+            const event = getEnhancedCalendarEvent(baseEvent, status);
 
             console.log(`Creating calendar event in branch calendar: ${branchCalendarName} (${calendarId})`);
             calendarResponse = await calendar.events.insert({ 
@@ -936,7 +1054,7 @@ router.get('/getBooking/:booking_id', async (req, res) => {
 router.put('/updateBooking/:booking_id', async (req, res) => {
     try {
         const { booking_id } = req.params;
-        const { client_id, branch_id, date, time, service_ids, status } = req.body;
+        const { client_id, branch_id, date, time, service_ids, status, notes } = req.body;
 
         // Check if booking exists
         const bookingRef = firestore.collection(BOOKINGS_COLLECTION).doc(booking_id);
@@ -945,6 +1063,9 @@ router.put('/updateBooking/:booking_id', async (req, res) => {
         if (!doc.exists) {
             return res.status(404).json({ error: 'Booking not found' });
         }
+
+        const currentBookingData = doc.data();
+        const hasCalendarEvent = currentBookingData.calendar_event_id && currentBookingData.calendar_id;
 
         // Prepare update data (only include fields that are provided)
         const updateData = {
@@ -957,21 +1078,226 @@ router.put('/updateBooking/:booking_id', async (req, res) => {
         if (time !== undefined) updateData.time = time;
         if (service_ids !== undefined) updateData.service_ids = service_ids;
         if (status !== undefined) updateData.status = status;
+        if (notes !== undefined) updateData.notes = notes;
 
+        // Check for duplicate booking conflicts before updating
+        // Only check if date, time, branch_id, or status is being updated
+        if (date !== undefined || time !== undefined || branch_id !== undefined || status !== undefined) {
+            const checkDate = date !== undefined ? date : currentBookingData.date;
+            const checkTime = time !== undefined ? time : currentBookingData.time;
+            const checkBranchId = branch_id !== undefined ? branch_id : currentBookingData.branch_id;
+            const checkStatus = status !== undefined ? status : currentBookingData.status;
+            
+            // Only check for conflicts if the status is 'scheduled' (active booking)
+            if (checkStatus === 'scheduled') {
+                const duplicateQuery = await firestore.collection(BOOKINGS_COLLECTION)
+                    .where('branch_id', '==', checkBranchId)
+                    .where('date', '==', checkDate)
+                    .where('time', '==', checkTime)
+                    .where('status', '==', 'scheduled')
+                    .get();
+
+                // Check if there are any conflicting bookings (excluding the current booking being updated)
+                const conflictingBookings = duplicateQuery.docs.filter(doc => doc.id !== booking_id);
+                
+                if (conflictingBookings.length > 0) {
+                    const conflictingBooking = conflictingBookings[0].data();
+                    return res.status(409).json({ 
+                        error: 'A booking with the same branch, date, time, and scheduled status already exists',
+                        existing_booking_id: conflictingBookings[0].id,
+                        conflicting_details: {
+                            branch_id: checkBranchId,
+                            date: checkDate,
+                            time: checkTime,
+                            status: checkStatus,
+                            existing_client_id: conflictingBooking.client_id
+                        },
+                        message: 'Cannot update booking to conflict with existing scheduled appointment'
+                    });
+                }
+            }
+        }
+
+        // Update the booking in Firestore first
         await bookingRef.update(updateData);
 
         // Get updated booking
         const updatedDoc = await bookingRef.get();
         const updatedBookingData = updatedDoc.data();
 
-        res.status(200).json({ 
+        // Update Google Calendar event if it exists
+        let calendarUpdateResult = null;
+        if (hasCalendarEvent) {
+            try {
+                console.log(`Updating calendar event for booking ${booking_id} in calendar ${currentBookingData.calendar_id}`);
+                
+                const scopes = [
+                    'https://www.googleapis.com/auth/calendar',
+                    'https://www.googleapis.com/auth/calendar.events'
+                ];
+                
+                const oauth2Client = new google.auth.JWT({
+                    email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
+                    key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
+                    scopes,
+                });
+                
+                const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+                // Fetch updated related data for calendar event
+                const [clientDetails, servicesDetails, branchDetails] = await Promise.all([
+                    getClientDetails(updatedBookingData.client_id),
+                    getServicesDetails(updatedBookingData.service_ids || []),
+                    getBranchDetails(updatedBookingData.branch_id)
+                ]);
+
+                const { services, totalCost } = servicesDetails;
+
+                // Create updated event description
+                const servicesList = services.length > 0 
+                    ? services.map(s => `• ${s.name} (${s.category}) - ₱${s.price.toFixed(2)}`).join('\n')
+                    : '• No specific services selected';
+
+                const eventDescription = `
+📅 BRANCH BOOKING DETAILS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+👤 CLIENT INFORMATION
+Name: ${clientDetails.name}
+Email: ${clientDetails.email}
+Phone: ${clientDetails.phone}
+${clientDetails.address ? `Address: ${clientDetails.address}` : ''}
+
+🏢 BRANCH INFORMATION  
+Branch: ${branchDetails.name}
+Location: ${branchDetails.address}
+Contact: ${branchDetails.phone}
+${branchDetails.email ? `Email: ${branchDetails.email}` : ''}
+
+💼 SERVICES BOOKED
+${servicesList}
+
+💰 BOOKING SUMMARY
+Total Cost: ₱${totalCost.toFixed(2)}
+Status: ${updatedBookingData.status.toUpperCase()}
+Booking ID: ${booking_id}
+
+${updatedBookingData.notes ? `📝 NOTES\n${updatedBookingData.notes}` : ''}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Branch Calendar: ${currentBookingData.calendar_name || 'Branch Bookings'}
+Updated: ${updateData.updated_at}
+                `.trim();
+
+                // Parse date and time for calendar event
+                let startDateTime;
+                const dateTimeString = `${updatedBookingData.date} ${updatedBookingData.time}`;
+                
+                // Try multiple formats to parse the input correctly
+                startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila');
+                
+                if (!startDateTime.isValid()) {
+                    startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm', 'Asia/Manila');
+                }
+                
+                if (!startDateTime.isValid()) {
+                    startDateTime = moment.tz(`${updatedBookingData.date}T${updatedBookingData.time}`, 'Asia/Manila');
+                }
+                
+                if (!startDateTime.isValid()) {
+                    throw new Error(`Unable to parse date and time: ${updatedBookingData.date} ${updatedBookingData.time}`);
+                }
+
+                const endDateTime = startDateTime.clone().add(60, 'minutes'); // Default 1-hour duration
+
+                // Prepare base updated event data
+                const baseUpdatedEvent = {
+                    summary: `${clientDetails.name} - ${branchDetails.name}${services.length > 0 ? ` (${services.map(s => s.name).join(', ')})` : ''}`,
+                    description: eventDescription,
+                    start: { 
+                        dateTime: startDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                        timeZone: 'Asia/Manila'
+                    },
+                    end: { 
+                        dateTime: endDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                        timeZone: 'Asia/Manila'
+                    },
+                    location: branchDetails.address,
+                    reminders: {
+                        useDefault: false,
+                        overrides: [
+                            { method: 'email', minutes: 24 * 60 }, // 24 hours before
+                            { method: 'popup', minutes: 30 }       // 30 minutes before
+                        ]
+                    },
+                    visibility: 'public',
+                    extendedProperties: {
+                        private: {
+                            bookingId: booking_id,
+                            clientId: updatedBookingData.client_id,
+                            branchId: updatedBookingData.branch_id,
+                            branchName: branchDetails.name,
+                            totalCost: totalCost.toString(),
+                            serviceIds: JSON.stringify(updatedBookingData.service_ids || []),
+                            bookingStatus: updatedBookingData.status,
+                            calendarType: 'branch_specific',
+                            lastUpdated: updateData.updated_at
+                        }
+                    }
+                };
+
+                // Apply enhanced calendar event with color coding
+                const updatedEvent = getEnhancedCalendarEvent(baseUpdatedEvent, updatedBookingData.status);
+
+                // Update the calendar event
+                const calendarResponse = await calendar.events.update({
+                    calendarId: currentBookingData.calendar_id,
+                    eventId: currentBookingData.calendar_event_id,
+                    requestBody: updatedEvent
+                });
+
+                if (calendarResponse.status === 200) {
+                    console.log(`Calendar event updated successfully for booking ${booking_id}`);
+                    calendarUpdateResult = {
+                        success: true,
+                        calendar_event_id: calendarResponse.data.id,
+                        calendar_event_link: calendarResponse.data.htmlLink,
+                        updated_at: updateData.updated_at
+                    };
+                } else {
+                    console.log(`Calendar event update failed for booking ${booking_id}`);
+                    calendarUpdateResult = {
+                        success: false,
+                        error: 'Calendar API returned non-200 status'
+                    };
+                }
+
+            } catch (calendarError) {
+                console.error(`Error updating calendar event for booking ${booking_id}:`, calendarError.message);
+                calendarUpdateResult = {
+                    success: false,
+                    error: calendarError.message,
+                    details: calendarError.response?.data || null
+                };
+            }
+        }
+
+        // Prepare response
+        const responseData = {
             message: 'Booking updated successfully',
             booking: {
                 id: updatedDoc.id,
                 ...updatedBookingData,
                 background_color: getStatusBackgroundColor(updatedBookingData.status)
             }
-        });
+        };
+
+        // Add calendar update result if available
+        if (calendarUpdateResult) {
+            responseData.calendar_update = calendarUpdateResult;
+        }
+
+        res.status(200).json(responseData);
 
     } catch (error) {
         console.error('Error updating booking:', error);
@@ -1409,6 +1735,80 @@ router.post('/share-all-calendars-with-admins', async (req, res) => {
                 'Verify master_admin accounts exist in the database',
                 'Ensure branches collection exists and has valid data'
             ]
+        });
+    }
+}); 
+
+// Test endpoint for calendar color system
+router.get('/test-calendar-colors', async (req, res) => {
+    try {
+        const { status = 'scheduled' } = req.query;
+        
+        // Test the color system with different statuses
+        const testStatuses = [
+            'scheduled', 'confirmed', 'pending', 'cancelled', 'completed', 
+            'no-show', 'rescheduled', 'in-progress', 'waiting', 'late', 
+            'early', 'urgent', 'vip', 'walk-in', 'online', 'phone',
+            'paid', 'unpaid', 'partial', 'refunded', 'maintenance', 
+            'holiday', 'training', 'meeting', 'break'
+        ];
+        
+        const colorResults = testStatuses.map(testStatus => {
+            const colorId = getCalendarColorId(testStatus);
+            const colorName = getCalendarColorName(colorId);
+            
+            return {
+                status: testStatus,
+                colorId: colorId,
+                colorName: colorName,
+                isCurrentStatus: testStatus.toLowerCase() === status.toLowerCase()
+            };
+        });
+        
+        // Test enhanced calendar event function
+        const testEvent = {
+            summary: 'Test Event - Color System',
+            description: 'This is a test event to verify the color system.',
+            start: { 
+                dateTime: moment.tz('Asia/Manila').add(1, 'hour').format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                timeZone: 'Asia/Manila'
+            },
+            end: { 
+                dateTime: moment.tz('Asia/Manila').add(2, 'hours').format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                timeZone: 'Asia/Manila'
+            }
+        };
+        
+        const enhancedEvent = getEnhancedCalendarEvent(testEvent, status);
+        
+        res.status(200).json({
+            message: 'Calendar color system test completed',
+            requested_status: status,
+            color_mapping: colorResults,
+            test_event: {
+                original: testEvent,
+                enhanced: enhancedEvent,
+                color_applied: {
+                    colorId: enhancedEvent.colorId,
+                    colorName: getCalendarColorName(enhancedEvent.colorId)
+                }
+            },
+            system_info: {
+                total_statuses_supported: colorResults.length,
+                color_ids_used: [...new Set(colorResults.map(r => r.colorId))].sort(),
+                default_color: {
+                    colorId: '7',
+                    colorName: 'Blue',
+                    description: 'Default color for unknown statuses'
+                }
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error testing calendar color system:', error);
+        res.status(500).json({
+            error: 'Failed to test calendar color system',
+            details: error.message
         });
     }
 }); 

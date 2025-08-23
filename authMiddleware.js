@@ -1,12 +1,15 @@
 const admin = require('./firebaseAdmin');
 
 async function requireAuthHeader(req, res, next) {
-  // Skip auth check for the getAccountByEmail and getEmailClient endpoints
+  // Skip auth check for the registerClientPublic endpoint
+  // Note: When using app.use('/api', middleware), req.path doesn't include /api prefix
   if (
-    req.path.startsWith('/api/clients/getEmailClient')
+    req.path.startsWith('/clients/registerClientPublic') ||
+    req.originalUrl.startsWith('/api/clients/registerClientPublic')
   ) {
     return next();
   }
+  
   const authHeader = req.headers.authorization;
   if (!authHeader) {
     return res.status(401).json({ error: 'Authorization header missing' });
@@ -20,7 +23,6 @@ async function requireAuthHeader(req, res, next) {
   }
   try {
     const decodedToken = await admin.auth().verifyIdToken(token);
-    // console.log(decodedToken , 'decodedToken')
     req.user = decodedToken; // Optionally attach user info to request
     next();
   } catch (error) {
