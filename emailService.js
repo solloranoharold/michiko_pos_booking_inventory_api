@@ -28,7 +28,7 @@ function initializeTransporter() {
         transporter = nodemailer.createTransport({
             host: emailHost,
             port: process.env.EMAIL_PORT || 587,
-            secure: process.env.EMAIL_SECURE === 'true', // true for 465, false for other ports
+            secure: false, // true for 465, false for other ports
             auth: {
                 user: process.env.EMAIL_USER,
                 pass: process.env.EMAIL_PASS
@@ -436,22 +436,67 @@ async function sendBookingEmail(bookingData, clientDetails, branchDetails, servi
         if (hasBranchCredentials) {
             try {
                 console.log(`Creating branch-specific email transporter for ${branchName}`);
-                emailTransporter = nodemailer.createTransport({
-                    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-                    port: process.env.EMAIL_PORT || 587,
-                    secure: process.env.EMAIL_SECURE === 'true',
-                    auth: {
-                        user: branchDetails.email,
-                        pass: branchDetails.set_password
-                    },
-                    tls: {
-                        rejectUnauthorized: false
-                    }
-                });
                 
-                // Test the branch-specific connection
-                await emailTransporter.verify();
-                console.log(`Branch-specific email transporter verified successfully for ${branchName}`);
+                // Try different SSL/TLS configurations to handle protocol mismatches
+                const transporterConfigs = [
+                    {
+                        host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+                        port: process.env.EMAIL_PORT || 587,
+                        secure: false, // Start with non-SSL
+                        auth: {
+                            user: branchDetails.email,
+                            pass: branchDetails.set_password
+                        },
+                        tls: {
+                            rejectUnauthorized: false,
+                            ciphers: 'SSLv3'
+                        }
+                    },
+                    {
+                        host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+                        port: process.env.EMAIL_PORT || 587,
+                        secure: false,
+                        auth: {
+                            user: branchDetails.email,
+                            pass: branchDetails.set_password
+                        },
+                        tls: {
+                            rejectUnauthorized: false,
+                            minVersion: 'TLSv1',
+                            maxVersion: 'TLSv1.3'
+                        }
+                    },
+                    {
+                        host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+                        port: process.env.EMAIL_PORT || 587,
+                        secure: false,
+                        auth: {
+                            user: branchDetails.email,
+                            pass: branchDetails.set_password
+                        },
+                        tls: false // Disable TLS completely
+                    }
+                ];
+
+                let connectionSuccessful = false;
+                for (let i = 0; i < transporterConfigs.length && !connectionSuccessful; i++) {
+                    try {
+                        console.log(`Trying transporter config ${i + 1} for ${branchName}`);
+                        emailTransporter = nodemailer.createTransport(transporterConfigs[i]);
+                        
+                        // Test the branch-specific connection
+                        await emailTransporter.verify();
+                        console.log(`Branch-specific email transporter verified successfully for ${branchName} with config ${i + 1}`);
+                        connectionSuccessful = true;
+                    } catch (configError) {
+                        console.log(`Config ${i + 1} failed for ${branchName}:`, configError.message);
+                        if (i === transporterConfigs.length - 1) {
+                            // Last config failed, throw the error
+                            throw configError;
+                        }
+                    }
+                }
+                
             } catch (error) {
                 console.error(`Error creating branch-specific email transporter for ${branchName}:`, error);
                 // Fall back to global transporter if branch-specific fails
