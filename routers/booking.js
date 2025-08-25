@@ -6,7 +6,7 @@ const moment = require('moment-timezone');
 // for calendar API
 const { google } = require('googleapis');
 const { calendarRateLimiter } = require('../calendar-rate-limiter');
-const emailService = require('../service/emailService.js');
+const emailService = require('./emailService.js');
 
 const router = express.Router();
 const firestore = admin.firestore();
