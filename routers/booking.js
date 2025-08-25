@@ -6,7 +6,23 @@ const moment = require('moment-timezone');
 // for calendar API
 const { google } = require('googleapis');
 const { calendarRateLimiter } = require('../calendar-rate-limiter');
-const emailService = require('./emailService.js');
+
+// Robust emailService import with fallback
+let emailService;
+try {
+    emailService = require('../emailService.js');
+} catch (error) {
+    console.warn('Warning: emailService module not found, email functionality will be disabled:', error.message);
+    // Create a mock emailService to prevent crashes
+    emailService = {
+        sendBookingConfirmation: async () => ({ success: false, error: 'Email service not available' }),
+        sendBookingUpdate: async () => ({ success: false, error: 'Email service not available' }),
+        sendBookingCancellation: async () => ({ success: false, error: 'Email service not available' }),
+        sendBookingCompletion: async () => ({ success: false, error: 'Email service not available' }),
+        sendBookingEmail: async () => ({ success: false, error: 'Email service not available' }),
+        testConnection: async () => ({ success: false, error: 'Email service not available' })
+    };
+}
 
 const router = express.Router();
 const firestore = admin.firestore();

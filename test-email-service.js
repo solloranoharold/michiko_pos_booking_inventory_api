@@ -1,5 +1,5 @@
 require("dotenv").config();
-const emailService = require('./service/emailService');
+const emailService = require('./emailService.js');
 
 async function testEmailService() {
     console.log('🧪 Testing Email Service...\n');
