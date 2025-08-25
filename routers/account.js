@@ -62,6 +62,7 @@ router.post('/insertAccount', async (req, res) => {
       government_ids:[],
       signIn: null,
       signOut: null,
+      isCalendarShared: false,
     };
     // Use email as document ID for easy retrieval
     await firestore.collection(ACCOUNTS_COLLECTION).doc(email).set(account);
@@ -218,7 +219,7 @@ router.get('/getAccountByEmail/:email', async (req, res) => {
 router.put('/updateAccount/:email', async (req, res) => {
   try {
     const { email } = req.params;
-    const { status, role, branch_id = null, name, government_ids, position, commission_rate = 0 } = req.body;
+    const { status, role, branch_id = null, name, government_ids, position, commission_rate = 0, isCalendarShared } = req.body;
     
     // Check if position is required for staff role
     if (role === 'staff' && !position) {
@@ -248,6 +249,8 @@ router.put('/updateAccount/:email', async (req, res) => {
     if (government_ids !== undefined) updateData.government_ids = government_ids;
     if (position !== undefined) updateData.position = position;
     if (commission_rate !== undefined) updateData.commission_rate = role === 'staff' ? commission_rate : null;
+    if (isCalendarShared !== undefined) updateData.isCalendarShared = isCalendarShared;
+    else updateData.isCalendarShared = false;
     await docRef.update(updateData);
     // Get updated account
     const updatedSnap = await docRef.get();

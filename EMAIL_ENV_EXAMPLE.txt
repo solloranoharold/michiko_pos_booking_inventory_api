@@ -1,0 +1,41 @@
+# Email Service Configuration
+# Copy these variables to your .env file and fill in your actual values
+
+# Email Server Settings
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_SECURE=false
+EMAIL_USER=your-email@gmail.com
+EMAIL_PASS=your-app-password
+
+# Frontend URL for Accept/Decline Links
+FRONTEND_URL=https://your-frontend-domain.com
+
+# Example configurations for different email providers:
+
+# Gmail (Recommended for Development)
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_SECURE=false
+EMAIL_USER=your-gmail@gmail.com
+EMAIL_PASS=your-app-password
+
+# Outlook/Hotmail
+EMAIL_HOST=smtp-mail.outlook.com
+EMAIL_PORT=587
+EMAIL_SECURE=false
+EMAIL_USER=your-email@outlook.com
+EMAIL_PASS=your-password
+
+# Custom SMTP Server
+EMAIL_HOST=mail.yourdomain.com
+EMAIL_PORT=587
+EMAIL_SECURE=false
+EMAIL_USER=noreply@yourdomain.com
+EMAIL_PASS=your-password
+
+# Notes:
+# - For Gmail, you need to create an App Password if 2FA is enabled
+# - EMAIL_SECURE=true for port 465, false for ports 25, 587, 2525
+# - FRONTEND_URL is used to generate accept/decline links in emails
+# - Make sure to add these variables to your .env file, not this text file 

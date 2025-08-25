@@ -21,7 +21,7 @@ function getSubscriptionType(date_created){
 // CREATE a new branch
 router.post('/insertBranch', async (req, res) => {
   try {
-    const { email, address, contactno ,name } = req.body;
+    const { email, address, contactno, name } = req.body;
     
     // Get authenticated user information
     const authenticatedUser = req.user;
@@ -33,7 +33,7 @@ router.post('/insertBranch', async (req, res) => {
     let created_by =  authenticatedUser.email ||'master_admin';
     let created_by_role = authenticatedUser.role || 'master_admin';
 
-    if (!email || !address || !contactno ||!name) {
+    if (!email || !address || !contactno || !name) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
     // Check if a branch with the same email already exists
@@ -43,6 +43,7 @@ router.post('/insertBranch', async (req, res) => {
     }
     const id = uuidv4();
     const date_created = now();
+    
     const branchData = {
       id,
       email,
@@ -203,24 +204,29 @@ router.put('/updateBranch/:id', async (req, res) => {
     let updated_by_role = authenticatedUser.role || 'user';
     let updated_by_branch = authenticatedUser.branch_id || '';
     
-    const { email, address, contactno ,name ,subscription_status,subscription_type,subscription_start_date,subscription_end_date, created_by } = req.body;
+    const { email, address, contactno, name, subscription_status, subscription_type, subscription_start_date, subscription_end_date, created_by, set_password } = req.body;
     const prevData = branchSnap.data();
-    const updateData = {
-      email: email || prevData.email,
-      name: name || prevData.name,
-      address: address || prevData.address,
-      contactno: contactno || prevData.contactno,
-      subscription_status: subscription_status || prevData.subscription_status,
-      subscription_type: subscription_type || prevData.subscription_type,
-      subscription_start_date: subscription_start_date || prevData.subscription_start_date,
-      subscription_end_date: subscription_end_date || prevData.subscription_end_date,
-      created_by: created_by || prevData.created_by,
-      updated_by: updated_by || 'system',
-      updated_by_role: updated_by_role || 'system',
-      updated_by_branch: updated_by_branch || '',
-      date_updated: now(),
-      doc_type: 'BRANCH',
-    };
+    
+    // Build update data object, only including fields that have values
+    const updateData = {};
+    
+    if (email !== undefined) updateData.email = email;
+    if (name !== undefined) updateData.name = name;
+    if (address !== undefined) updateData.address = address;
+    if (contactno !== undefined) updateData.contactno = contactno;
+    if (subscription_status !== undefined) updateData.subscription_status = subscription_status;
+    if (subscription_type !== undefined) updateData.subscription_type = subscription_type;
+    if (subscription_start_date !== undefined) updateData.subscription_start_date = subscription_start_date;
+    if (subscription_end_date !== undefined) updateData.subscription_end_date = subscription_end_date;
+    if (created_by !== undefined) updateData.created_by = created_by;
+    if (set_password !== undefined) updateData.set_password = set_password;
+    
+    // Always update these fields
+    updateData.updated_by = updated_by || 'system';
+    updateData.updated_by_role = updated_by_role || 'system';
+    updateData.updated_by_branch = updated_by_branch || '';
+    updateData.date_updated = now();
+    updateData.doc_type = 'BRANCH';
     await branchRef.update(updateData);
     res.json({ ...prevData, ...updateData });
   } catch (error) {
@@ -259,4 +265,6 @@ router.get('/getBranchAll', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 })
+
+
 module.exports = router; 

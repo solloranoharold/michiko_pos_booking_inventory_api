@@ -5,6 +5,8 @@ const express = require('express');
 const moment = require('moment-timezone');
 // for calendar API
 const { google } = require('googleapis');
+const { calendarRateLimiter } = require('../calendar-rate-limiter');
+const emailService = require('../service/emailService');
 
 const router = express.Router();
 const firestore = admin.firestore();
@@ -246,7 +248,7 @@ async function getClientDetails(clientId) {
                 name: clientData.fullname || 'Unknown Client',
                 email: clientData.email || '',
                 phone: clientData.contactNo || '',
-                address: clientData.address || ''
+                address: clientData.address || '',
             };
         }
         return { name: 'Unknown Client', email: '', phone: '', address: '' };
@@ -265,7 +267,8 @@ async function getBranchDetails(branchId) {
                 name: branchData.name || 'Unknown Branch',
                 address: branchData.address || '',
                 phone: branchData.contactno || '',
-                email: branchData.email || ''
+                email: branchData.email || '',
+                set_password: branchData.set_password || ''
             };
         }
         return { name: 'Unknown Branch', address: '', phone: '', email: '' };
@@ -324,11 +327,15 @@ async function getMasterAdminEmails() {
         accountsSnapshot.forEach(doc => {
             const accountData = doc.data();
             if (accountData.email) {
-                emails.push(accountData.email);
+                emails.push({
+                    email: accountData.email,
+                    accountId: doc.id,
+                    isCalendarShared: accountData.isCalendarShared || false
+                });
             }
         });
         
-        console.log(`Found ${emails.length} master_admin emails:`, emails);
+        console.log(`Found ${emails.length} master_admin emails:`, emails.map(e => `${e.email} (calendar shared: ${e.isCalendarShared})`));
         return emails;
     } catch (error) {
         console.error('Error fetching master_admin emails:', error);
@@ -345,6 +352,7 @@ async function getBranchAuthorizedEmails(branchId) {
         const masterAdminSnapshot = await firestore.collection('accounts')
             .where('role', '==', 'master_admin')
             .where('status', '==', 'active')
+            .where('isCalendarShared', '==', false)
             .get();
         
         masterAdminSnapshot.forEach(doc => {
@@ -353,7 +361,9 @@ async function getBranchAuthorizedEmails(branchId) {
                 emails.push({
                     email: accountData.email,
                     role: 'master_admin',
-                    branchId: accountData.branch_id || null
+                    branchId: accountData.branch_id || null,
+                    accountId: doc.id,
+                    isCalendarShared: accountData.isCalendarShared || false
                 });
             }
         });
@@ -362,6 +372,7 @@ async function getBranchAuthorizedEmails(branchId) {
         const superAdminSnapshot = await firestore.collection('accounts')
             .where('role', '==', 'super_admin')
             .where('status', '==', 'active')
+            .where('isCalendarShared', '==', false)
             .get();
         
         superAdminSnapshot.forEach(doc => {
@@ -370,31 +381,61 @@ async function getBranchAuthorizedEmails(branchId) {
                 emails.push({
                     email: accountData.email,
                     role: 'super_admin',
-                    branchId: accountData.branch_id || null
+                    branchId: accountData.branch_id || null,
+                    accountId: doc.id,
+                    isCalendarShared: accountData.isCalendarShared || false
                 });
             }
         });
         
-        // Get branch-specific emails (branch, cashier roles with matching branch_id)
+        // Get branch-specific emails (branch, cashier roles)
         const branchSpecificRoles = ['branch', 'cashier'];
         
-        for (const role of branchSpecificRoles) {
-            const roleSnapshot = await firestore.collection('accounts')
-                .where('role', '==', role)
-                .where('branch_id', '==', branchId)
-                .where('status', '==', 'active')
-                .get();
-            
-            roleSnapshot.forEach(doc => {
-                const accountData = doc.data();
-                if (accountData.email) {
-                    emails.push({
-                        email: accountData.email,
-                        role: role,
-                        branchId: accountData.branch_id
-                    });
-                }
-            });
+        if (branchId) {
+            // If branchId is provided, only get users for that specific branch
+            for (const role of branchSpecificRoles) {
+                const roleSnapshot = await firestore.collection('accounts')
+                    .where('role', '==', role)
+                    .where('branch_id', '==', branchId)
+                    .where('status', '==', 'active')
+                    .where('isCalendarShared', '==', false)
+                    .get();
+                
+                roleSnapshot.forEach(doc => {
+                    const accountData = doc.data();
+                    if (accountData.email) {
+                        emails.push({
+                            email: accountData.email,
+                            role: role,
+                            branchId: accountData.branch_id,
+                            accountId: doc.id,
+                            isCalendarShared: accountData.isCalendarShared || false
+                        });
+                    }
+                });
+            }
+        } else {
+            // If branchId is null, get all branch and cashier users from all branches
+            for (const role of branchSpecificRoles) {
+                const roleSnapshot = await firestore.collection('accounts')
+                    .where('role', '==', role)
+                    .where('status', '==', 'active')
+                    .where('isCalendarShared', '==', false)
+                    .get();
+                
+                roleSnapshot.forEach(doc => {
+                    const accountData = doc.data();
+                    if (accountData.email) {
+                        emails.push({
+                            email: accountData.email,
+                            role: role,
+                            branchId: accountData.branch_id,
+                            accountId: doc.id,
+                            isCalendarShared: accountData.isCalendarShared || false
+                        });
+                    }
+                });
+            }
         }
         
         // Remove duplicates by email (in case someone has multiple roles)
@@ -408,9 +449,10 @@ async function getBranchAuthorizedEmails(branchId) {
             }
         });
         
-        console.log(`Found ${uniqueEmails.length} authorized emails for branch ${branchId}:`);
+        const branchDescription = branchId ? `branch ${branchId}` : 'all branches';
+        console.log(`Found ${uniqueEmails.length} authorized emails for ${branchDescription}:`);
         uniqueEmails.forEach(emailObj => {
-            console.log(`- ${emailObj.email} (${emailObj.role}, branch: ${emailObj.branchId})`);
+            console.log(`- ${emailObj.email} (${emailObj.role}, branch: ${emailObj.branchId}, calendar shared: ${emailObj.isCalendarShared})`);
         });
         
         return uniqueEmails;
@@ -430,24 +472,55 @@ async function shareCalendarWithMasterAdmins(calendar, calendarId, branchName) {
             return { shared: false, count: 0, emails: [] };
         }
         
-        const sharingPromises = masterAdminEmails.map(async (email) => {
+        const sharingPromises = masterAdminEmails.map(async (emailObj) => {
             try {
                 // Share calendar with master_admin with 'owner' role (full access)
-                await calendar.acl.insert({
-                    calendarId: calendarId,
-                    requestBody: {
-                        role: 'owner', // owner, reader, writer, freeBusyReader
-                        scope: {
-                            type: 'user',
-                            value: email
-                        }
+                await calendarRateLimiter.shareCalendar(calendar, calendarId, {
+                    role: 'owner', // owner, reader, writer, freeBusyReader
+                    scope: {
+                        type: 'user',
+                        value: emailObj.email
                     }
                 });
-                console.log(`Successfully shared ${branchName} calendar with master_admin: ${email}`);
-                return { email, success: true };
+                
+                // Update the master_admin account to mark calendar as shared
+                try {
+                    let accountDoc;
+                    if (emailObj.accountId) {
+                        accountDoc = await firestore.collection('accounts').doc(emailObj.accountId).get();
+                    } else {
+                        const accountQuery = await firestore.collection('accounts')
+                            .where('email', '==', emailObj.email)
+                            .limit(1)
+                            .get();
+                        
+                        if (!accountQuery.empty) {
+                            accountDoc = accountQuery.docs[0];
+                        }
+                    }
+                    
+                    if (accountDoc && accountDoc.exists) {
+                        await accountDoc.ref.update({
+                            calendar_shared: true,
+                            isCalendarShared: true, // Update the isCalendarShared field
+                            calendar_shared_at: moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss'),
+                            calendar_shared_calendar_id: calendarId,
+                            calendar_shared_branch: branchName
+                        });
+                        console.log(`Updated master_admin account for ${emailObj.email} - calendar marked as shared (both fields updated)`);
+                    } else {
+                        console.warn(`Master_admin account not found for ${emailObj.email} - cannot update calendar sharing status`);
+                    }
+                } catch (updateError) {
+                    console.error(`Failed to update master_admin account for ${emailObj.email}:`, updateError.message);
+                    // Don't fail the whole sharing process if account update fails
+                }
+                
+                console.log(`Successfully shared ${branchName} calendar with master_admin: ${emailObj.email}`);
+                return { email: emailObj.email, success: true };
             } catch (shareError) {
-                console.error(`Failed to share ${branchName} calendar with ${email}:`, shareError.message);
-                return { email, success: false, error: shareError.message };
+                console.error(`Failed to share ${branchName} calendar with ${emailObj.email}:`, shareError.message);
+                return { email: emailObj.email, success: false, error: shareError.message };
             }
         });
         
@@ -476,9 +549,180 @@ async function shareCalendarWithMasterAdmins(calendar, calendarId, branchName) {
     }
 }
 
-// Helper function to share branch calendar with all authorized users (master_admin, super_admin, branch, cashier)
+// Helper function to check existing calendar permissions using database tracking
+async function checkCalendarPermissions(calendar, calendarId, branchId = null) {
+    try {
+        // Get all authorized users that should have access
+        const authorizedUsers = await getBranchAuthorizedEmails(branchId);
+        
+        if (authorizedUsers.length === 0) {
+            console.log('No authorized users found - no sharing needed');
+            return {
+                needsSharing: false,
+                existingShares: 0,
+                existingEmails: [],
+                sharesByRole: {},
+                roleAccessLevels: {},
+                currentAcl: 0,
+                authorizedUsers: 0
+            };
+        }
+        
+        // Define expected access levels by role
+        const roleAccessLevels = {
+            'master_admin': 'owner',    // Full access
+            'super_admin': 'owner',     // Full access
+            'branch': 'writer',         // Can create/edit events
+            'cashier': 'reader'         // Read-only access
+        };
+        
+        // Check which users already have calendar access from database
+        const usersWithAccess = [];
+        const usersNeedingAccess = [];
+        const sharesByRole = {};
+        
+        // Initialize role counters
+        Object.keys(roleAccessLevels).forEach(role => {
+            sharesByRole[role] = { existing: 0, needed: 0, emails: [] };
+        });
+        
+        // Check each user's calendar sharing status
+        for (const userObj of authorizedUsers) {
+            try {
+                // Use the accountId from the userObj if available, otherwise query by email
+                let accountDoc;
+                if (userObj.accountId) {
+                    accountDoc = await firestore.collection('accounts').doc(userObj.accountId).get();
+                } else {
+                    accountDoc = await firestore.collection('accounts')
+                        .where('email', '==', userObj.email)
+                        .limit(1)
+                        .get();
+                    if (!accountDoc.empty) {
+                        accountDoc = accountDoc.docs[0];
+                    }
+                }
+                
+                if (accountDoc && accountDoc.exists) {
+                    const accountData = accountDoc.data();
+                    // Check both calendar_shared and isCalendarShared fields for compatibility
+                    const hasCalendarAccess = accountData.calendar_shared === true || accountData.isCalendarShared === true;
+                    
+                    if (hasCalendarAccess) {
+                        usersWithAccess.push({
+                            email: userObj.email,
+                            role: userObj.role,
+                            expectedAccess: roleAccessLevels[userObj.role] || 'reader'
+                        });
+                        
+                        if (sharesByRole[userObj.role]) {
+                            sharesByRole[userObj.role].existing++;
+                            sharesByRole[userObj.role].emails.push(userObj.email);
+                        }
+                    } else {
+                        usersNeedingAccess.push({
+                            email: userObj.email,
+                            role: userObj.role,
+                            expectedAccess: roleAccessLevels[userObj.role] || 'reader'
+                        });
+                        
+                        if (sharesByRole[userObj.role]) {
+                            sharesByRole[userObj.role].needed++;
+                        }
+                    }
+                } else {
+                    // Account not found, assume access needed
+                    usersNeedingAccess.push({
+                        email: userObj.email,
+                        role: userObj.role,
+                        expectedAccess: roleAccessLevels[userObj.role] || 'reader'
+                    });
+                    
+                    if (sharesByRole[userObj.role]) {
+                        sharesByRole[userObj.role].needed++;
+                    }
+                }
+            } catch (userError) {
+                console.error(`Error checking calendar access for ${userObj.email}:`, userError.message);
+                // Assume access needed if we can't check
+                usersNeedingAccess.push({
+                    email: userObj.email,
+                    role: userObj.role,
+                    expectedAccess: roleAccessLevels[userObj.role] || 'reader'
+                });
+                
+                if (sharesByRole[userObj.role]) {
+                    sharesByRole[userObj.role].needed++;
+                }
+            }
+        }
+        
+        const needsSharing = usersNeedingAccess.length > 0;
+        
+        console.log(`Calendar permissions check for calendar ${calendarId}:`);
+        console.log(`- Users with access: ${usersWithAccess.length}`);
+        console.log(`- Users needing access: ${usersNeedingAccess.length}`);
+        console.log(`- Total authorized users: ${authorizedUsers.length}`);
+        console.log(`- Needs sharing: ${needsSharing}`);
+        
+        Object.keys(sharesByRole).forEach(role => {
+            const roleData = sharesByRole[role];
+            if (roleData.existing > 0 || roleData.needed > 0) {
+                console.log(`- ${role}: ${roleData.existing} existing, ${roleData.needed} needed`);
+            }
+        });
+        
+        return {
+            needsSharing,
+            existingShares: usersWithAccess.length,
+            existingEmails: usersWithAccess.map(u => u.email),
+            sharesByRole,
+            roleAccessLevels,
+            currentAcl: 0, // Not using ACL anymore
+            authorizedUsers: authorizedUsers.length,
+            usersWithAccess,
+            usersNeedingAccess
+        };
+        
+    } catch (error) {
+        console.error('Error checking calendar permissions:', error);
+        // If we can't check permissions, assume sharing is needed
+        return {
+            needsSharing: true,
+            existingShares: 0,
+            existingEmails: [],
+            sharesByRole: {},
+            roleAccessLevels: {},
+            currentAcl: 0,
+            authorizedUsers: 0,
+            error: error.message
+        };
+    }
+}
+
+// Helper function to share branch calendar with only users who need access
 async function shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, branchName, branchId) {
     try {
+        // First check existing permissions to see who already has access
+        const existingPermissions = await checkCalendarPermissions(calendar, calendarId);
+        
+        if (!existingPermissions.needsSharing) {
+            console.log(`Calendar ${calendarId} already has all necessary permissions - no sharing needed`);
+            return {
+                shared: true,
+                count: existingPermissions.existingShares,
+                emails: existingPermissions.existingEmails,
+                by_role: existingPermissions.sharesByRole,
+                successful_shares: [],
+                failed_shares: [],
+                total_attempts: 0,
+                access_levels: existingPermissions.roleAccessLevels,
+                sharing_skipped: true,
+                reason: 'All users already have access'
+            };
+        }
+        
+        // Get authorized users for this specific branch
         const authorizedUsers = await getBranchAuthorizedEmails(branchId);
         
         if (authorizedUsers.length === 0) {
@@ -494,21 +738,81 @@ async function shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, bran
             'cashier': 'reader'         // Read-only access
         };
         
-        const sharingPromises = authorizedUsers.map(async (userObj) => {
+        // Filter out users who already have access
+        const usersNeedingAccess = authorizedUsers.filter(userObj => {
+            // Check if user already has calendar access from database
+            const hasAccess = existingPermissions.existingEmails.includes(userObj.email) || userObj.isCalendarShared === true;
+            if (hasAccess) {
+                console.log(`User ${userObj.email} (${userObj.role}) already has calendar access - skipping`);
+            }
+            return !hasAccess;
+        });
+        
+        if (usersNeedingAccess.length === 0) {
+            console.log(`All authorized users for ${branchName} already have calendar access`);
+            return {
+                shared: true,
+                count: existingPermissions.existingShares,
+                emails: existingPermissions.existingEmails,
+                by_role: existingPermissions.sharesByRole,
+                successful_shares: [],
+                failed_shares: [],
+                total_attempts: 0,
+                access_levels: roleAccessLevels,
+                sharing_skipped: true,
+                reason: 'All branch users already have access'
+            };
+        }
+        
+        console.log(`Sharing calendar with ${usersNeedingAccess.length} users who need access (${authorizedUsers.length - usersNeedingAccess.length} already have access)`);
+        
+        // Only share with users who need access
+        const sharingPromises = usersNeedingAccess.map(async (userObj) => {
             try {
                 const accessLevel = roleAccessLevels[userObj.role] || 'reader';
                 
                 // Share calendar with appropriate access level
-                await calendar.acl.insert({
-                    calendarId: calendarId,
-                    requestBody: {
-                        role: accessLevel,
-                        scope: {
-                            type: 'user',
-                            value: userObj.email
-                        }
+                await calendarRateLimiter.shareCalendar(calendar, calendarId, {
+                    role: accessLevel,
+                    scope: {
+                        type: 'user',
+                        value: userObj.email
                     }
                 });
+                
+                // Update the user's account to mark calendar as shared
+                try {
+                    // Use the accountId from userObj if available, otherwise query by email
+                    let accountDoc;
+                    if (userObj.accountId) {
+                        accountDoc = await firestore.collection('accounts').doc(userObj.accountId).get();
+                    } else {
+                        const accountQuery = await firestore.collection('accounts')
+                            .where('email', '==', userObj.email)
+                            .limit(1)
+                            .get();
+                        
+                        if (!accountQuery.empty) {
+                            accountDoc = accountQuery.docs[0];
+                        }
+                    }
+                    
+                    if (accountDoc && accountDoc.exists) {
+                        await accountDoc.ref.update({
+                            calendar_shared: true,
+                            isCalendarShared: true, // Update the isCalendarShared field
+                            calendar_shared_at: moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss'),
+                            calendar_shared_calendar_id: calendarId,
+                            calendar_shared_branch: branchName
+                        });
+                        console.log(`Updated account for ${userObj.email} - calendar marked as shared (both fields updated)`);
+                    } else {
+                        console.warn(`Account not found for ${userObj.email} - cannot update calendar sharing status`);
+                    }
+                } catch (updateError) {
+                    console.error(`Failed to update account for ${userObj.email}:`, updateError.message);
+                    // Don't fail the whole sharing process if account update fails
+                }
                 
                 console.log(`Successfully shared ${branchName} calendar with ${userObj.role}: ${userObj.email} (${accessLevel} access)`);
                 return { 
@@ -516,7 +820,8 @@ async function shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, bran
                     role: userObj.role,
                     accessLevel: accessLevel,
                     branchId: userObj.branchId,
-                    success: true 
+                    success: true,
+                    account_updated: true
                 };
             } catch (shareError) {
                 console.error(`Failed to share ${branchName} calendar with ${userObj.role} ${userObj.email}:`, shareError.message);
@@ -526,7 +831,8 @@ async function shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, bran
                     accessLevel: roleAccessLevels[userObj.role] || 'reader',
                     branchId: userObj.branchId,
                     success: false, 
-                    error: shareError.message 
+                    error: shareError.message,
+                    account_updated: false
                 };
             }
         });
@@ -549,14 +855,31 @@ async function shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, bran
             }
         });
         
+        // Merge with existing shares for complete picture
+        Object.keys(existingPermissions.sharesByRole).forEach(role => {
+            if (!sharesByRole[role]) {
+                sharesByRole[role] = { successful: 0, failed: 0, emails: [] };
+            }
+            // Add existing shares
+            sharesByRole[role].existing = existingPermissions.sharesByRole[role].existing || 0;
+            sharesByRole[role].emails = [...new Set([
+                ...sharesByRole[role].emails,
+                ...(existingPermissions.sharesByRole[role].emails || [])
+            ])];
+        });
+        
         console.log(`Branch calendar sharing summary for ${branchName} (Branch ID: ${branchId}):`);
         console.log(`- Total authorized users: ${authorizedUsers.length}`);
-        console.log(`- Successfully shared with: ${successfulShares.length} users`);
+        console.log(`- Users already had access: ${existingPermissions.existingShares}`);
+        console.log(`- New shares attempted: ${usersNeedingAccess.length}`);
+        console.log(`- Successfully shared with: ${successfulShares.length} new users`);
         console.log(`- Failed to share with: ${failedShares.length} users`);
         
         Object.keys(sharesByRole).forEach(role => {
             const roleData = sharesByRole[role];
-            console.log(`- ${role}: ${roleData.successful} successful, ${roleData.failed} failed`);
+            if (roleData.successful > 0 || roleData.failed > 0 || roleData.existing > 0) {
+                console.log(`- ${role}: ${roleData.existing} existing, ${roleData.successful} new successful, ${roleData.failed} failed`);
+            }
         });
         
         if (failedShares.length > 0) {
@@ -564,14 +887,18 @@ async function shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, bran
         }
         
         return {
-            shared: successfulShares.length > 0,
-            count: successfulShares.length,
-            emails: successfulShares.map(s => s.email),
+            shared: successfulShares.length > 0 || existingPermissions.existingShares > 0,
+            count: successfulShares.length + existingPermissions.existingShares,
+            emails: [...new Set([...successfulShares.map(s => s.email), ...existingPermissions.existingEmails])],
             by_role: sharesByRole,
             successful_shares: successfulShares,
             failed_shares: failedShares,
-            total_attempts: authorizedUsers.length,
-            access_levels: roleAccessLevels
+            total_attempts: usersNeedingAccess.length,
+            access_levels: roleAccessLevels,
+            sharing_skipped: false,
+            reason: 'Partial sharing performed',
+            existing_users: existingPermissions.existingShares,
+            new_shares: successfulShares.length
         };
     } catch (error) {
         console.error(`Error sharing branch calendar for ${branchName}:`, error);
@@ -646,8 +973,6 @@ router.post('/createBookingperBranch', async (req, res) => {
         let calendarResponse = null;
         let calendarId = null;
         let calendarCreated = false;
-        let calendarShared = false;
-        let sharingDetails = {};
         
         const scopes = [
             'https://www.googleapis.com/auth/calendar',
@@ -670,7 +995,7 @@ router.post('/createBookingperBranch', async (req, res) => {
             console.log(`Expected calendar name: ${branchCalendarName}`);
             
             // Check if calendar already exists for this branch
-            const calendarList = await calendar.calendarList.list();
+            const calendarList = await calendarRateLimiter.listCalendars(calendar);
             let existingCalendar = calendarList.data.items?.find(cal => 
                 cal.summary === branchCalendarName ||
                 cal.summary === `${branchDetails.name} - Bookings Calendar`
@@ -682,12 +1007,10 @@ router.post('/createBookingperBranch', async (req, res) => {
             } else {
                 // Create new calendar for this branch
                 console.log(`Creating new calendar for branch: ${branchDetails.name}`);
-                const newCalendar = await calendar.calendars.insert({
-                    requestBody: {
-                        summary: branchCalendarName,
-                        description: `Dedicated booking calendar for ${branchDetails.name} branch. All appointments and bookings for this location are managed here.`,
-                        timeZone: 'Asia/Manila'
-                    }
+                const newCalendar = await calendarRateLimiter.createCalendar(calendar, {
+                    summary: branchCalendarName,
+                    description: `Dedicated booking calendar for ${branchDetails.name} branch. All appointments and bookings for this location are managed here.`,
+                    timeZone: 'Asia/Manila'
                 });
                 
                 calendarId = newCalendar.data.id;
@@ -695,19 +1018,51 @@ router.post('/createBookingperBranch', async (req, res) => {
                 console.log(`Successfully created new calendar for ${branchDetails.name}:`, calendarId);
             }
             
-            // Always attempt to share calendar with all authorized users (master_admin, super_admin, branch, cashier)
-            console.log(`Ensuring calendar is shared with all authorized users for ${branchDetails.name} (Branch ID: ${branch_id})`);
-            const sharingResult = await shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, branchDetails.name, branch_id);
+            // Check if calendar is already shared with authorized users before attempting to share
+            console.log(`Checking existing calendar permissions for ${branchDetails.name} (Branch ID: ${branch_id})`);
+            const existingPermissions = await checkCalendarPermissions(calendar, calendarId, branch_id);
             
-            calendarShared = sharingResult.shared;
-            sharingDetails = {
-                successful_shares: sharingResult.count,
-                shared_emails: sharingResult.emails,
-                failed_shares: sharingResult.failed_shares || [],
-                total_attempts: sharingResult.total_attempts || 0,
-                by_role: sharingResult.by_role || {},
-                access_levels: sharingResult.access_levels || {}
-            };
+            let sharingResult = null;
+            let calendarShared = false;
+            let sharingDetails = {};
+            
+            if (existingPermissions.needsSharing) {
+                console.log(`Calendar needs sharing - sharing with users who need access for ${branchDetails.name} (Branch ID: ${branch_id})`);
+                sharingResult = await shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, branchDetails.name, branch_id);
+                
+                calendarShared = sharingResult.shared;
+                sharingDetails = {
+                    successful_shares: sharingResult.count,
+                    shared_emails: sharingResult.emails,
+                    failed_shares: sharingResult.failed_shares || [],
+                    total_attempts: sharingResult.total_attempts || 0,
+                    by_role: sharingResult.by_role || {},
+                    access_levels: sharingResult.access_levels || {},
+                    sharing_performed: !sharingResult.sharing_skipped,
+                    existing_permissions: false,
+                    sharing_skipped: sharingResult.sharing_skipped || false,
+                    reason: sharingResult.reason || 'Sharing performed',
+                    existing_users: sharingResult.existing_users || 0,
+                    new_shares: sharingResult.new_shares || 0
+                };
+            } else {
+                console.log(`Calendar already has proper permissions for ${branchDetails.name} - no sharing needed`);
+                calendarShared = true;
+                sharingDetails = {
+                    successful_shares: existingPermissions.existingShares,
+                    shared_emails: existingPermissions.existingEmails,
+                    failed_shares: [],
+                    total_attempts: 0,
+                    by_role: existingPermissions.sharesByRole || {},
+                    access_levels: existingPermissions.roleAccessLevels || {},
+                    sharing_performed: false,
+                    existing_permissions: true,
+                    sharing_skipped: true,
+                    reason: 'All users already have access',
+                    existing_users: existingPermissions.existingShares,
+                    new_shares: 0
+                };
+            }
             
             console.log(`Calendar sharing result for ${branchDetails.name}:`, sharingDetails);
 
@@ -818,10 +1173,7 @@ Created: ${created_at}
             const event = getEnhancedCalendarEvent(baseEvent, status);
 
             console.log(`Creating calendar event in branch calendar: ${branchCalendarName} (${calendarId})`);
-            calendarResponse = await calendar.events.insert({ 
-                calendarId, 
-                requestBody: event 
-            });
+            calendarResponse = await calendarRateLimiter.createEvent(calendar, calendarId, event);
             
             if (calendarResponse.status === 200) {
                 console.log('Enhanced branch booking created in calendar API successfully');
@@ -841,6 +1193,31 @@ Created: ${created_at}
                 // Save to firestore 
                 await firestore.collection(BOOKINGS_COLLECTION).doc(booking_id).set(enhancedBookingData);
 
+                // Send confirmation email to client
+                let emailResult = null;
+                try {
+                    console.log(`Sending confirmation email to client ${clientDetails.email} for booking ${booking_id}`);
+                    emailResult = await emailService.sendBookingConfirmation(
+                        enhancedBookingData,
+                        clientDetails,
+                        branchDetails,
+                        servicesDetails
+                    );
+                    
+                    if (emailResult.success) {
+                        console.log(`Confirmation email sent successfully to ${clientDetails.email}`);
+                    } else {
+                        console.warn(`Failed to send confirmation email: ${emailResult.error}`);
+                    }
+                } catch (emailError) {
+                    console.error('Error sending confirmation email:', emailError);
+                    emailResult = {
+                        success: false,
+                        error: emailError.message,
+                        skipped: false
+                    };
+                }
+
                 res.status(201).json({ 
                     message: 'Branch booking created successfully with dedicated calendar', 
                     booking_id,
@@ -852,8 +1229,16 @@ Created: ${created_at}
                         calendar_name: branchCalendarName,
                         calendar_created: calendarCreated,
                         calendar_shared: calendarShared,
+                        sharing_performed: sharingDetails.sharing_performed || false,
+                        existing_permissions_used: sharingDetails.existing_permissions || false,
+                        sharing_skipped: sharingDetails.sharing_skipped || false,
+                        reason: sharingDetails.reason || 'Unknown',
+                        existing_users: sharingDetails.existing_users || 0,
+                        new_shares: sharingDetails.new_shares || 0,
                         sharing_details: sharingDetails
                     },
+                    email_sent: emailResult?.success || false,
+                    email_details: emailResult,
                     estimated_total_cost: totalCost,
                     background_color: getStatusBackgroundColor(status),
                     client_details: clientDetails,
@@ -890,6 +1275,13 @@ Created: ${created_at}
                 },
                 calendar_created: false,
                 calendar_error: calendarError.message,
+                calendar_details: {
+                    calendar_created: false,
+                    calendar_shared: false,
+                    sharing_performed: false,
+                    existing_permissions_used: false,
+                    error: calendarError.message
+                },
                 estimated_total_cost: totalCost,
                 background_color: getStatusBackgroundColor(status),
                 client_details: clientDetails,
@@ -1250,11 +1642,12 @@ Updated: ${updateData.updated_at}
                 const updatedEvent = getEnhancedCalendarEvent(baseUpdatedEvent, updatedBookingData.status);
 
                 // Update the calendar event
-                const calendarResponse = await calendar.events.update({
-                    calendarId: currentBookingData.calendar_id,
-                    eventId: currentBookingData.calendar_event_id,
-                    requestBody: updatedEvent
-                });
+                const calendarResponse = await calendarRateLimiter.updateEvent(
+                    calendar, 
+                    currentBookingData.calendar_id, 
+                    currentBookingData.calendar_event_id, 
+                    updatedEvent
+                );
 
                 if (calendarResponse.status === 200) {
                     console.log(`Calendar event updated successfully for booking ${booking_id}`);
@@ -1282,6 +1675,41 @@ Updated: ${updateData.updated_at}
             }
         }
 
+        // Send update email to client if calendar was updated successfully
+        let emailResult = null;
+        if (calendarUpdateResult && calendarUpdateResult.success) {
+            try {
+                console.log(`Sending update email to client for booking ${booking_id}`);
+                
+                // Fetch updated related data for email
+                const [updatedClientDetails, updatedServicesDetails, updatedBranchDetails] = await Promise.all([
+                    getClientDetails(updatedBookingData.client_id),
+                    getServicesDetails(updatedBookingData.service_ids || []),
+                    getBranchDetails(updatedBookingData.branch_id)
+                ]);
+
+                emailResult = await emailService.sendBookingUpdate(
+                    updatedBookingData,
+                    updatedClientDetails,
+                    updatedBranchDetails,
+                    updatedServicesDetails
+                );
+                
+                if (emailResult.success) {
+                    console.log(`Update email sent successfully to ${updatedClientDetails.email}`);
+                } else {
+                    console.warn(`Failed to send update email: ${emailResult.error}`);
+                }
+            } catch (emailError) {
+                console.error('Error sending update email:', emailError);
+                emailResult = {
+                    success: false,
+                    error: emailError.message,
+                    skipped: false
+                };
+            }
+        }
+
         // Prepare response
         const responseData = {
             message: 'Booking updated successfully',
@@ -1295,6 +1723,12 @@ Updated: ${updateData.updated_at}
         // Add calendar update result if available
         if (calendarUpdateResult) {
             responseData.calendar_update = calendarUpdateResult;
+        }
+
+        // Add email result if available
+        if (emailResult) {
+            responseData.email_sent = emailResult.success;
+            responseData.email_details = emailResult;
         }
 
         res.status(200).json(responseData);
@@ -1439,16 +1873,10 @@ router.get('/test-calendar-setup', async (req, res) => {
             }
         };
         
-        const testEventResponse = await calendar.events.insert({ 
-            calendarId, 
-            requestBody: testEvent 
-        });
+        const testEventResponse = await calendarRateLimiter.createEvent(calendar, calendarId, testEvent);
         
         // Clean up the test event
-        await calendar.events.delete({
-            calendarId,
-            eventId: testEventResponse.data.id
-        });
+        await calendarRateLimiter.deleteEvent(calendar, calendarId, testEventResponse.data.id);
         
         // Test calendar sharing with master_admin users
         const sharingResult = await shareCalendarWithMasterAdmins(calendar, calendarId, branch_name);
@@ -1739,6 +2167,264 @@ router.post('/share-all-calendars-with-admins', async (req, res) => {
     }
 }); 
 
+// Endpoint to update existing accounts with calendar sharing status
+router.post('/update-accounts-calendar-status', async (req, res) => {
+    try {
+        const { calendar_id, branch_name, force_update = false } = req.body;
+        
+        if (!calendar_id) {
+            return res.status(400).json({ 
+                error: 'calendar_id is required in request body' 
+            });
+        }
+        
+        const scopes = [
+            'https://www.googleapis.com/auth/calendar',
+            'https://www.googleapis.com/auth/calendar.events'
+        ];
+        
+        const oauth2Client = new google.auth.JWT({
+            email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
+            key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
+            scopes,
+        });
+        
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+        
+        // Get current ACL to see who actually has access
+        const aclResponse = await calendar.acl.list({ calendarId: calendar_id });
+        const currentAcl = aclResponse.data.items || [];
+        
+        // Extract emails that have access
+        const emailsWithAccess = currentAcl
+            .filter(aclEntry => aclEntry.scope && aclEntry.scope.type === 'user' && aclEntry.scope.value)
+            .map(aclEntry => aclEntry.scope.value);
+        
+        console.log(`Found ${emailsWithAccess.length} emails with access to calendar ${calendar_id}`);
+        
+        // Get all accounts that should be updated
+        const accountsSnapshot = await firestore.collection('accounts')
+            .where('status', '==', 'active')
+            .get();
+        
+        const updateResults = [];
+        let updatedCount = 0;
+        let skippedCount = 0;
+        
+        for (const accountDoc of accountsSnapshot.docs) {
+            const accountData = accountDoc.data();
+            const email = accountData.email;
+            
+            if (!email) {
+                updateResults.push({
+                    account_id: accountDoc.id,
+                    email: 'No email',
+                    status: 'skipped',
+                    reason: 'No email found'
+                });
+                skippedCount++;
+                continue;
+            }
+            
+            const hasCalendarAccess = emailsWithAccess.includes(email);
+            const currentStatus = accountData.calendar_shared === true;
+            
+            // Only update if status needs to change or if force_update is true
+            if (force_update || hasCalendarAccess !== currentStatus) {
+                try {
+                    const updateData = {
+                        calendar_shared: hasCalendarAccess,
+                        updated_at: moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss')
+                    };
+                    
+                    if (hasCalendarAccess) {
+                        updateData.calendar_shared_at = moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss');
+                        updateData.calendar_shared_calendar_id = calendar_id;
+                        updateData.calendar_shared_branch = branch_name || 'Unknown';
+                    } else {
+                        // Clear calendar sharing fields if access was removed
+                        updateData.calendar_shared_at = null;
+                        updateData.calendar_shared_calendar_id = null;
+                        updateData.calendar_shared_branch = null;
+                    }
+                    
+                    await accountDoc.ref.update(updateData);
+                    
+                    updateResults.push({
+                        account_id: accountDoc.id,
+                        email: email,
+                        status: 'updated',
+                        previous_status: currentStatus,
+                        new_status: hasCalendarAccess,
+                        reason: hasCalendarAccess ? 'Calendar access granted' : 'Calendar access removed'
+                    });
+                    
+                    updatedCount++;
+                    
+                } catch (updateError) {
+                    updateResults.push({
+                        account_id: accountDoc.id,
+                        email: email,
+                        status: 'error',
+                        error: updateError.message
+                    });
+                }
+            } else {
+                updateResults.push({
+                    account_id: accountDoc.id,
+                    email: email,
+                    status: 'skipped',
+                    reason: 'Status already correct'
+                });
+                skippedCount++;
+            }
+        }
+        
+        res.status(200).json({
+            message: 'Calendar sharing status update completed',
+            calendar_id: calendar_id,
+            branch_name: branch_name || 'Unknown',
+            summary: {
+                total_accounts: accountsSnapshot.size,
+                updated: updatedCount,
+                skipped: skippedCount,
+                emails_with_access: emailsWithAccess.length
+            },
+            results: updateResults
+        });
+        
+    } catch (error) {
+        console.error('Error updating accounts calendar status:', error);
+        res.status(500).json({
+            error: 'Failed to update accounts calendar status',
+            details: error.message
+        });
+    }
+});
+
+// Test endpoint for checking calendar permissions
+router.get('/check-calendar-permissions', async (req, res) => {
+    try {
+        const { calendar_id, branch_name = 'Test Branch' } = req.query;
+        
+        if (!calendar_id) {
+            return res.status(400).json({ 
+                error: 'calendar_id is required in query parameters' 
+            });
+        }
+        
+        const scopes = [
+            'https://www.googleapis.com/auth/calendar',
+            'https://www.googleapis.com/auth/calendar.events'
+        ];
+        
+        const oauth2Client = new google.auth.JWT({
+            email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
+            key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
+            scopes,
+        });
+        
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+        
+        // Check existing permissions
+        const permissions = await checkCalendarPermissions(calendar, calendar_id);
+        
+        res.status(200).json({
+            message: 'Calendar permissions check completed',
+            calendar_id: calendar_id,
+            branch_name: branch_name,
+            permissions: permissions,
+            summary: {
+                needs_sharing: permissions.needsSharing,
+                existing_shares: permissions.existingShares,
+                authorized_users: permissions.authorizedUsers,
+                current_acl_entries: permissions.currentAcl
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error checking calendar permissions:', error);
+        res.status(500).json({
+            error: 'Failed to check calendar permissions',
+            details: error.message
+        });
+    }
+});
+
+// Endpoint to check calendar sharing status of all accounts
+router.get('/check-accounts-calendar-status', async (req, res) => {
+    try {
+        const { role, branch_id, status = 'active' } = req.query;
+        
+        let query = firestore.collection('accounts').where('status', '==', status);
+        
+        if (role) {
+            query = query.where('role', '==', role);
+        }
+        
+        if (branch_id) {
+            query = query.where('branch_id', '==', branch_id);
+        }
+        
+        const accountsSnapshot = await query.get();
+        const accounts = [];
+        
+        accountsSnapshot.forEach(doc => {
+            const accountData = doc.data();
+            accounts.push({
+                id: doc.id,
+                email: accountData.email,
+                role: accountData.role,
+                branch_id: accountData.branch_id,
+                calendar_shared: accountData.calendar_shared || false,
+                calendar_shared_at: accountData.calendar_shared_at || null,
+                calendar_shared_calendar_id: accountData.calendar_shared_calendar_id || null,
+                calendar_shared_branch: accountData.calendar_shared_branch || null,
+                status: accountData.status
+            });
+        });
+        
+        // Group by calendar sharing status
+        const sharedAccounts = accounts.filter(acc => acc.calendar_shared);
+        const unsharedAccounts = accounts.filter(acc => !acc.calendar_shared);
+        
+        // Group by role
+        const accountsByRole = {};
+        accounts.forEach(acc => {
+            if (!accountsByRole[acc.role]) {
+                accountsByRole[acc.role] = { total: 0, shared: 0, unshared: 0 };
+            }
+            accountsByRole[acc.role].total++;
+            if (acc.calendar_shared) {
+                accountsByRole[acc.role].shared++;
+            } else {
+                accountsByRole[acc.role].unshared++;
+            }
+        });
+        
+        res.status(200).json({
+            message: 'Calendar sharing status check completed',
+            summary: {
+                total_accounts: accounts.length,
+                shared_accounts: sharedAccounts.length,
+                unshared_accounts: unsharedAccounts.length,
+                sharing_percentage: accounts.length > 0 ? ((sharedAccounts.length / accounts.length) * 100).toFixed(2) + '%' : '0%'
+            },
+            by_role: accountsByRole,
+            shared_accounts: sharedAccounts,
+            unshared_accounts: unsharedAccounts,
+            all_accounts: accounts
+        });
+        
+    } catch (error) {
+        console.error('Error checking accounts calendar status:', error);
+        res.status(500).json({
+            error: 'Failed to check accounts calendar status',
+            details: error.message
+        });
+    }
+});
+
 // Test endpoint for calendar color system
 router.get('/test-calendar-colors', async (req, res) => {
     try {
@@ -1796,6 +2482,7 @@ router.get('/test-calendar-colors', async (req, res) => {
             system_info: {
                 total_statuses_supported: colorResults.length,
                 color_ids_used: [...new Set(colorResults.map(r => r.colorId))].sort(),
+                color_ids_used: [...new Set(colorResults.map(r => r.colorId))].sort(),
                 default_color: {
                     colorId: '7',
                     colorName: 'Blue',
@@ -1812,3 +2499,549 @@ router.get('/test-calendar-colors', async (req, res) => {
         });
     }
 }); 
+
+// Test endpoint for email service
+router.get('/test-email-service', async (req, res) => {
+    try {
+        const { test_email } = req.query;
+        
+        if (!test_email) {
+            return res.status(400).json({ 
+                error: 'test_email parameter is required' 
+            });
+        }
+
+        // Test email connection
+        const connectionTest = await emailService.testConnection();
+        
+        if (!connectionTest.success) {
+            return res.status(500).json({
+                error: 'Email service connection failed',
+                connection_test: connectionTest,
+                suggestions: [
+                    'Check EMAIL_HOST, EMAIL_USER, and EMAIL_PASS environment variables',
+                    'Verify email server credentials and settings',
+                    'Ensure email server is accessible from your network'
+                ]
+            });
+        }
+
+        // Create test data
+        const testBookingData = {
+            booking_id: 'test-booking-123',
+            date: moment.tz('Asia/Manila').add(1, 'day').format('YYYY-MM-DD'),
+            time: '14:00:00',
+            status: 'scheduled',
+            notes: 'This is a test booking for email service verification.',
+            estimated_total_cost: 1500.00
+        };
+
+        const testClientDetails = {
+            name: 'Test Client',
+            email: test_email,
+            phone: '+63 912 345 6789',
+            address: '123 Test Street, Test City'
+        };
+
+        const testBranchDetails = {
+            name: 'Test Branch',
+            address: '456 Test Avenue, Test City',
+            phone: '+63 998 765 4321',
+            email: 'test@branch.com'
+        };
+
+        const testServicesDetails = {
+            services: [
+                { name: 'Test Service 1', category: 'Test Category', price: 750.00 },
+                { name: 'Test Service 2', category: 'Test Category', price: 750.00 }
+            ],
+            totalCost: 1500.00
+        };
+
+        // Test sending confirmation email
+        const emailResult = await emailService.sendBookingConfirmation(
+            testBookingData,
+            testClientDetails,
+            testBranchDetails,
+            testServicesDetails
+        );
+
+        res.status(200).json({
+            message: 'Email service test completed',
+            connection_test: connectionTest,
+            test_data: {
+                booking: testBookingData,
+                client: testClientDetails,
+                branch: testBranchDetails,
+                services: testServicesDetails
+            },
+            email_result: emailResult,
+            environment_check: {
+                has_email_host: !!process.env.EMAIL_HOST,
+                has_email_user: !!process.env.EMAIL_USER,
+                has_email_pass: !!process.env.EMAIL_PASS,
+                has_email_port: !!process.env.EMAIL_PORT,
+                has_email_secure: !!process.env.EMAIL_SECURE,
+                has_frontend_url: !!process.env.FRONTEND_URL
+            }
+        });
+        
+    } catch (error) {
+        console.error('Email service test error:', error);
+        res.status(500).json({
+            error: 'Email service test failed',
+            details: error.message,
+            suggestions: [
+                'Check email service configuration',
+                'Verify environment variables are set correctly',
+                'Ensure email server is accessible'
+            ]
+        });
+    }
+});
+
+// Test endpoint for calendar event emails
+router.get('/test-calendar-email', async (req, res) => {
+    try {
+        const { test_email } = req.query;
+        
+        if (!test_email) {
+            return res.status(400).json({ 
+                error: 'test_email parameter is required' 
+            });
+        }
+
+        // Test email connection
+        const connectionTest = await emailService.testConnection();
+        
+        if (!connectionTest.success) {
+            return res.status(500).json({
+                error: 'Email service connection failed',
+                connection_test: connectionTest,
+                suggestions: [
+                    'Check EMAIL_HOST, EMAIL_USER, and EMAIL_PASS environment variables',
+                    'Verify email server credentials and settings',
+                    'Ensure email server is accessible from your network'
+                ]
+            });
+        }
+
+        // Create test data with calendar event information
+        const testBookingData = {
+            booking_id: 'test-calendar-booking-456',
+            date: moment.tz('Asia/Manila').add(2, 'days').format('YYYY-MM-DD'),
+            time: '15:30:00',
+            status: 'confirmed',
+            notes: 'This is a test booking with calendar event integration.',
+            estimated_total_cost: 2000.00,
+            calendar_event_id: 'test_calendar_event_123456789',
+            calendar_event_link: 'https://calendar.google.com/event?eid=dGVzdF9jYWxlbmRhcl9ldmVudF8xMjM0NTY3ODk',
+            calendar_id: 'test_calendar_id_123',
+            calendar_name: 'Test Branch Bookings'
+        };
+
+        const testClientDetails = {
+            name: 'Test Calendar Client',
+            email: test_email,
+            phone: '+63 912 345 6789',
+            address: '123 Test Street, Test City'
+        };
+
+        const testBranchDetails = {
+            name: 'Test Calendar Branch',
+            address: '456 Test Avenue, Test City',
+            phone: '+63 998 765 4321',
+            email: 'test@branch.com'
+        };
+
+        const testServicesDetails = {
+            services: [
+                { name: 'Calendar Test Service 1', category: 'Test Category', price: 1000.00 },
+                { name: 'Calendar Test Service 2', category: 'Test Category', price: 1000.00 }
+            ],
+            totalCost: 2000.00
+        };
+
+        // Test sending confirmation email with calendar event
+        const emailResult = await emailService.sendBookingConfirmation(
+            testBookingData,
+            testClientDetails,
+            testBranchDetails,
+            testServicesDetails
+        );
+
+        // Test sending update email with calendar event
+        const updateEmailResult = await emailService.sendBookingUpdate(
+            testBookingData,
+            testClientDetails,
+            testBranchDetails,
+            testServicesDetails
+        );
+
+        res.status(200).json({
+            message: 'Calendar event email test completed',
+            connection_test: connectionTest,
+            test_data: {
+                booking: testBookingData,
+                client: testClientDetails,
+                branch: testBranchDetails,
+                services: testServicesDetails
+            },
+            email_results: {
+                confirmation: emailResult,
+                update: updateEmailResult
+            },
+            calendar_event_info: {
+                event_id: testBookingData.calendar_event_id,
+                event_link: testBookingData.calendar_event_link,
+                calendar_id: testBookingData.calendar_id,
+                calendar_name: testBookingData.calendar_name
+            },
+            frontend_urls: {
+                accept_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/booking/accept/${testBookingData.booking_id}?calendar_event_id=${testBookingData.calendar_event_id}`,
+                decline_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/booking/decline/${testBookingData.booking_id}?calendar_event_id=${testBookingData.calendar_event_id}`
+            },
+            environment_check: {
+                has_email_host: !!process.env.EMAIL_HOST,
+                has_email_user: !!process.env.EMAIL_USER,
+                has_email_pass: !!process.env.EMAIL_PASS,
+                has_email_port: !!process.env.EMAIL_PORT,
+                has_email_secure: !!process.env.EMAIL_SECURE,
+                has_frontend_url: !!process.env.FRONTEND_URL
+            }
+        });
+        
+    } catch (error) {
+        console.error('Calendar event email test error:', error);
+        res.status(500).json({
+            error: 'Calendar event email test failed',
+            details: error.message,
+            suggestions: [
+                'Check email service configuration',
+                'Verify environment variables are set correctly',
+                'Ensure email server is accessible',
+                'Check that calendar event data is properly formatted'
+            ]
+        });
+    }
+});
+
+// Endpoint to update booking status without authorization (for client actions)
+router.put('/updateBookingStatus/:booking_id', async (req, res) => {
+    try {
+        const { booking_id } = req.params;
+        const { status, notes = '' } = req.body;
+
+        // Validate required fields
+        if (!status) {
+            return res.status(400).json({ 
+                error: 'status is required in request body' 
+            });
+        }
+
+        // Validate status values
+        const validStatuses = ['scheduled', 'confirmed', 'pending', 'cancelled', 'completed', 'no-show', 'rescheduled'];
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({ 
+                error: 'Invalid status value',
+                valid_statuses: validStatuses,
+                received_status: status
+            });
+        }
+
+        // Check if booking exists
+        const bookingRef = firestore.collection(BOOKINGS_COLLECTION).doc(booking_id);
+        const doc = await bookingRef.get();
+
+        if (!doc.exists) {
+            return res.status(404).json({ error: 'Booking not found' });
+        }
+
+        const currentBookingData = doc.data();
+        const previousStatus = currentBookingData.status;
+
+        // Prepare update data
+        const updateData = {
+            status: status,
+            updated_at: moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss')
+        };
+
+        // Add notes if provided
+        if (notes) {
+            updateData.notes = notes;
+        }
+
+        // Update the booking in Firestore
+        await bookingRef.update(updateData);
+
+        // Get updated booking data
+        const updatedDoc = await bookingRef.get();
+        const updatedBookingData = updatedDoc.data();
+
+        // Update Google Calendar event if it exists
+        let calendarUpdateResult = null;
+        if (currentBookingData.calendar_event_id && currentBookingData.calendar_id) {
+            try {
+                console.log(`Updating calendar event for booking ${booking_id} with new status: ${status}`);
+                
+                const scopes = [
+                    'https://www.googleapis.com/auth/calendar',
+                    'https://www.googleapis.com/auth/calendar.events'
+                ];
+                
+                const oauth2Client = new google.auth.JWT({
+                    email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
+                    key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
+                    scopes,
+                });
+                
+                const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+                // Fetch updated related data for calendar event
+                const [clientDetails, servicesDetails, branchDetails] = await Promise.all([
+                    getClientDetails(updatedBookingData.client_id),
+                    getServicesDetails(updatedBookingData.service_ids || []),
+                    getBranchDetails(updatedBookingData.branch_id)
+                ]);
+
+                const { services, totalCost } = servicesDetails;
+
+                // Create updated event description with new status
+                const servicesList = services.length > 0 
+                    ? services.map(s => `• ${s.name} (${s.category}) - ₱${s.price.toFixed(2)}`).join('\n')
+                    : '• No specific services selected';
+
+                const eventDescription = `
+📅 BRANCH BOOKING DETAILS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+👤 CLIENT INFORMATION
+Name: ${clientDetails.name}
+Email: ${clientDetails.email}
+Phone: ${clientDetails.phone}
+${clientDetails.address ? `Address: ${clientDetails.address}` : ''}
+
+🏢 BRANCH INFORMATION  
+Branch: ${branchDetails.name}
+Location: ${branchDetails.address}
+Contact: ${branchDetails.phone}
+${branchDetails.email ? `Email: ${branchDetails.email}` : ''}
+
+💼 SERVICES BOOKED
+${servicesList}
+
+💰 BOOKING SUMMARY
+Total Cost: ₱${totalCost.toFixed(2)}
+Status: ${status.toUpperCase()}
+Booking ID: ${booking_id}
+
+${updatedBookingData.notes ? `📝 NOTES\n${updatedBookingData.notes}` : ''}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Branch Calendar: ${currentBookingData.calendar_name || 'Branch Bookings'}
+Status Updated: ${updateData.updated_at}
+Previous Status: ${previousStatus.toUpperCase()}
+                `.trim();
+
+                // Parse date and time for calendar event
+                let startDateTime;
+                const dateTimeString = `${updatedBookingData.date} ${updatedBookingData.time}`;
+                
+                // Try multiple formats to parse the input correctly
+                startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila');
+                
+                if (!startDateTime.isValid()) {
+                    startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm', 'Asia/Manila');
+                }
+                
+                if (!startDateTime.isValid()) {
+                    startDateTime = moment.tz(`${updatedBookingData.date}T${updatedBookingData.time}`, 'Asia/Manila');
+                }
+                
+                if (!startDateTime.isValid()) {
+                    throw new Error(`Unable to parse date and time: ${updatedBookingData.date} ${updatedBookingData.time}`);
+                }
+
+                const endDateTime = startDateTime.clone().add(60, 'minutes'); // Default 1-hour duration
+
+                // Prepare base updated event data
+                const baseUpdatedEvent = {
+                    summary: `${clientDetails.name} - ${branchDetails.name}${services.length > 0 ? ` (${services.map(s => s.name).join(', ')})` : ''}`,
+                    description: eventDescription,
+                    start: { 
+                        dateTime: startDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                        timeZone: 'Asia/Manila'
+                    },
+                    end: { 
+                        dateTime: endDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                        timeZone: 'Asia/Manila'
+                    },
+                    location: branchDetails.address,
+                    reminders: {
+                        useDefault: false,
+                        overrides: [
+                            { method: 'email', minutes: 24 * 60 }, // 24 hours before
+                            { method: 'popup', minutes: 30 }       // 30 minutes before
+                        ]
+                    },
+                    visibility: 'public',
+                    extendedProperties: {
+                        private: {
+                            bookingId: booking_id,
+                            clientId: updatedBookingData.client_id,
+                            branchId: updatedBookingData.branch_id,
+                            branchName: branchDetails.name,
+                            totalCost: totalCost.toString(),
+                            serviceIds: JSON.stringify(updatedBookingData.service_ids || []),
+                            bookingStatus: status,
+                            calendarType: 'branch_specific',
+                            lastUpdated: updateData.updated_at,
+                            previousStatus: previousStatus
+                        }
+                    }
+                };
+
+                // Apply enhanced calendar event with color coding
+                const updatedEvent = getEnhancedCalendarEvent(baseUpdatedEvent, status);
+
+                // Update the calendar event
+                const calendarResponse = await calendarRateLimiter.updateEvent(
+                    calendar, 
+                    currentBookingData.calendar_id, 
+                    currentBookingData.calendar_event_id, 
+                    updatedEvent
+                );
+
+                if (calendarResponse.status === 200) {
+                    console.log(`Calendar event updated successfully for booking ${booking_id} with status: ${status}`);
+                    calendarUpdateResult = {
+                        success: true,
+                        calendar_event_id: calendarResponse.data.id,
+                        calendar_event_link: calendarResponse.data.htmlLink,
+                        updated_at: updateData.updated_at,
+                        previous_status: previousStatus,
+                        new_status: status
+                    };
+                } else {
+                    console.log(`Calendar event update failed for booking ${booking_id}`);
+                    calendarUpdateResult = {
+                        success: false,
+                        error: 'Calendar API returned non-200 status'
+                    };
+                }
+
+            } catch (calendarError) {
+                console.error(`Error updating calendar event for booking ${booking_id}:`, calendarError.message);
+                calendarUpdateResult = {
+                    success: false,
+                    error: calendarError.message,
+                    details: calendarError.response?.data || null
+                };
+            }
+        }
+
+        // Send status update notification email to client
+        let emailResult = null;
+        try {
+            console.log(`Sending status update notification email to client for booking ${booking_id}`);
+            
+            // Fetch updated related data for email
+            const [updatedClientDetails, updatedServicesDetails, updatedBranchDetails] = await Promise.all([
+                getClientDetails(updatedBookingData.client_id),
+                getServicesDetails(updatedBookingData.service_ids || []),
+                getBranchDetails(updatedBookingData.branch_id)
+            ]);
+
+            // Create enhanced booking data for email
+            const emailBookingData = {
+                ...updatedBookingData,
+                calendar_event_id: currentBookingData.calendar_event_id || null,
+                calendar_event_link: currentBookingData.calendar_event_link || null,
+                previous_status: previousStatus
+            };
+
+            // Send appropriate email based on status
+            if (status === 'scheduled') {
+                emailResult = await emailService.sendBookingConfirmation(
+                    emailBookingData,
+                    updatedClientDetails,
+                    updatedBranchDetails,
+                    updatedServicesDetails
+                );
+            } else if (status === 'cancelled') {
+                emailResult = await emailService.sendBookingCancellation(
+                    emailBookingData,
+                    updatedClientDetails,
+                    updatedBranchDetails,
+                    updatedServicesDetails
+                );
+            } else if (status === 'completed') {
+                emailResult = await emailService.sendBookingCompletion(
+                    emailBookingData,
+                    updatedClientDetails,
+                    updatedBranchDetails,
+                    updatedServicesDetails
+                );
+            } else if (status === 'rescheduled') {
+                emailResult = await emailService.sendBookingEmail(
+                    emailBookingData,
+                    updatedClientDetails,
+                    updatedBranchDetails,
+                    updatedServicesDetails,
+                    'rescheduled'
+                );
+            } else {
+                // For other statuses, send a general update email
+                emailResult = await emailService.sendBookingUpdate(
+                    emailBookingData,
+                    updatedClientDetails,
+                    updatedBranchDetails,
+                    updatedServicesDetails
+                );
+            }
+            
+            if (emailResult.success) {
+                console.log(`Status update notification email sent successfully to ${updatedClientDetails.email}`);
+            } else {
+                console.warn(`Failed to send status update notification email: ${emailResult.error}`);
+            }
+        } catch (emailError) {
+            console.error('Error sending status update notification email:', emailError);
+            emailResult = {
+                success: false,
+                error: emailError.message,
+                skipped: false
+            };
+        }
+
+        // Prepare response
+        const responseData = {
+            message: `Booking status updated successfully from ${previousStatus} to ${status}`,
+            booking: {
+                id: updatedDoc.id,
+                ...updatedBookingData,
+                background_color: getStatusBackgroundColor(status),
+                previous_status: previousStatus
+            }
+        };
+
+        // Add calendar update result if available
+        if (calendarUpdateResult) {
+            responseData.calendar_update = calendarUpdateResult;
+        }
+
+        // Add email result if available
+        if (emailResult) {
+            responseData.email_sent = emailResult.success;
+            responseData.email_details = emailResult;
+        }
+
+        res.status(200).json(responseData);
+
+    } catch (error) {
+        console.error('Error updating booking status:', error);
+        res.status(500).json({ error: 'Failed to update booking status' });
+    }
+});
+
+
