@@ -2,109 +2,105 @@ require("dotenv").config();
 const nodemailer = require('nodemailer');
 const moment = require('moment-timezone');
 
-class EmailService {
-    constructor() {
-        this.transporter = null;
-        // this.initializeTransporter();
-    }
+// Global transporter variable
+let transporter = null;
 
-    // Initialize nodemailer transporter
-    initializeTransporter() {
-        try {
-            // Check if we have email credentials
-            if (!process.env.EMAIL_HOST || !process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-                console.warn('Email credentials not found. Email service will be disabled.');
-                this.transporter = null;
-                return;
+// Initialize nodemailer transporter
+function initializeTransporter() {
+    try {
+        // Check if we have email credentials
+        if (!process.env.EMAIL_HOST || !process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+            console.warn('Email credentials not found. Email service will be disabled.');
+            transporter = null;
+            return;
+        }
+
+        // Validate email host format
+        const emailHost = process.env.EMAIL_HOST.trim();
+        if (!emailHost.includes('.') || emailHost === 'gmail') {
+            console.error('Invalid EMAIL_HOST format. Please use full SMTP server address (e.g., smtp.gmail.com)');
+            transporter = null;
+            return;
+        }
+
+        console.log(`Initializing email transporter with host: ${emailHost}`);
+
+        transporter = nodemailer.createTransport({
+            host: emailHost,
+            port: process.env.EMAIL_PORT || 587,
+            secure: process.env.EMAIL_SECURE === 'true', // true for 465, false for other ports
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
+            },
+            tls: {
+                rejectUnauthorized: false // Only for development/testing
             }
+        });
 
-            // Validate email host format
-            const emailHost = process.env.EMAIL_HOST.trim();
-            if (!emailHost.includes('.') || emailHost === 'gmail') {
-                console.error('Invalid EMAIL_HOST format. Please use full SMTP server address (e.g., smtp.gmail.com)');
-                this.transporter = null;
-                return;
-            }
+        console.log('Email transporter initialized successfully');
+    } catch (error) {
+        console.error('Error initializing email transporter:', error);
+        transporter = null;
+    }
+}
 
-            console.log(`Initializing email transporter with host: ${emailHost}`);
-
-            this.transporter = nodemailer.createTransport({
-                host: emailHost,
-                port: process.env.EMAIL_PORT || 587,
-                secure: process.env.EMAIL_SECURE === 'true', // true for 465, false for other ports
-                auth: {
-                    user: process.env.EMAIL_USER,
-                    pass: process.env.EMAIL_PASS
-                },
-                tls: {
-                    rejectUnauthorized: false // Only for development/testing
-                }
-            });
-
-            console.log('Email transporter initialized successfully');
-        } catch (error) {
-            console.error('Error initializing email transporter:', error);
-            this.transporter = null;
-        }
+// Test email connection
+async function testConnection() {
+    if (!transporter) {
+        return { success: false, error: 'Email transporter not initialized' };
     }
 
-    // Test email connection
-    async testConnection() {
-        if (!this.transporter) {
-            return { success: false, error: 'Email transporter not initialized' };
-        }
-
-        try {
-            await this.transporter.verify();
-            return { success: true, message: 'Email connection verified successfully' };
-        } catch (error) {
-            return { success: false, error: error.message };
-        }
+    try {
+        await transporter.verify();
+        return { success: true, message: 'Email connection verified successfully' };
+    } catch (error) {
+        return { success: false, error: error.message };
     }
+}
 
-    // Generate HTML email template for booking confirmation
-    generateBookingEmailHTML(bookingData, clientDetails, branchDetails, servicesDetails, action = 'created') {
-        const { 
-            booking_id, 
-            date, 
-            time, 
-            status, 
-            notes,
-            estimated_total_cost,
-            calendar_event_id,
-            calendar_event_link
-        } = bookingData;
+// Generate HTML email template for booking confirmation
+function generateBookingEmailHTML(bookingData, clientDetails, branchDetails, servicesDetails, action = 'created') {
+    const { 
+        booking_id, 
+        date, 
+        time, 
+        status, 
+        notes,
+        estimated_total_cost,
+        calendar_event_id,
+        calendar_event_link
+    } = bookingData;
 
-        const { name: clientName, email: clientEmail } = clientDetails;
-        const { name: branchName, address: branchAddress, phone: branchPhone } = branchDetails;
-        const { services } = servicesDetails;
+    const { name: clientName, email: clientEmail } = clientDetails;
+    const { name: branchName, address: branchAddress, phone: branchPhone } = branchDetails;
+    const { services } = servicesDetails;
 
-        // Format date and time
-        const formattedDate = moment.tz(date, 'YYYY-MM-DD', 'Asia/Manila').format('dddd, MMMM Do YYYY');
-        const formattedTime = moment.tz(`${date} ${time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila').format('h:mm A');
+    // Format date and time
+    const formattedDate = moment.tz(date, 'YYYY-MM-DD', 'Asia/Manila').format('dddd, MMMM Do YYYY');
+    const formattedTime = moment.tz(`${date} ${time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila').format('h:mm A');
 
-        // Generate services list
-        const servicesList = services.length > 0 
-            ? services.map(service => `<li>${service.name} (${service.category}) }</li>`).join('')
-            : '<li>No specific services selected</li>';
+    // Generate services list
+    const servicesList = services.length > 0 
+        ? services.map(service => `<li>${service.name} (${service.category}) }</li>`).join('')
+        : '<li>No specific services selected</li>';
 
-        // Generate action buttons with calendar event ID included
-        const acceptButton = `
-                <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/booking/status/${booking_id}?status=scheduled" 
-                style="background-color: #4CAF50; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin-right: 10px; display: inline-block;">
-                ✅ Accept Booking
-            </a>`;
+    // Generate action buttons with calendar event ID included
+    const acceptButton = `
+            <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/booking/status/${booking_id}?status=scheduled" 
+            style="background-color: #4CAF50; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin-right: 10px; display: inline-block;">
+            ✅ Accept Booking
+        </a>`;
 
-        const declineButton = `
-            <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/booking/status/${booking_id}?status=cancelled" 
-               style="background-color: #f44336; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
-                ❌ Decline Booking
-            </a>`;
+    const declineButton = `
+        <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/booking/status/${booking_id}?status=cancelled" 
+           style="background-color: #f44336; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+            ❌ Decline Booking
+        </a>`;
 
+    const actionButtons = action === 'created' ? `${acceptButton}${declineButton}` : '';
 
-        const actionButtons = action === 'created' ? `${acceptButton}${declineButton}` : '';
-
-        return `
+    return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -337,47 +333,47 @@ class EmailService {
     </div>
 </body>
 </html>`;
-    }
+}
 
-    // Generate plain text email for fallback
-    generateBookingEmailText(bookingData, clientDetails, branchDetails, servicesDetails, action = 'created') {
-        const { 
-            booking_id, 
-            date, 
-            time, 
-            status, 
-            notes,
-            estimated_total_cost,
-            calendar_event_id,
-            calendar_event_link
-        } = bookingData;
+// Generate plain text email for fallback
+function generateBookingEmailText(bookingData, clientDetails, branchDetails, servicesDetails, action = 'created') {
+    const { 
+        booking_id, 
+        date, 
+        time, 
+        status, 
+        notes,
+        estimated_total_cost,
+        calendar_event_id,
+        calendar_event_link
+    } = bookingData;
 
-        const { name: clientName, email: clientEmail } = clientDetails;
-        const { name: branchName, address: branchAddress, phone: branchPhone } = branchDetails;
-        const { services } = servicesDetails;
+    const { name: clientName, email: clientEmail } = clientDetails;
+    const { name: branchName, address: branchAddress, phone: branchPhone } = branchDetails;
+    const { services } = servicesDetails;
 
-        const formattedDate = moment.tz(date, 'YYYY-MM-DD', 'Asia/Manila').format('dddd, MMMM Do YYYY');
-        const formattedTime = moment.tz(`${date} ${time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila').format('h:mm A');
+    const formattedDate = moment.tz(date, 'YYYY-MM-DD', 'Asia/Manila').format('dddd, MMMM Do YYYY');
+    const formattedTime = moment.tz(`${date} ${time}`, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila').format('h:mm A');
 
-        const servicesList = services.length > 0 
-            ? services.map(service => `- ${service.name} (${service.category})`).join('\n')
-            : '- No specific services selected';
+    const servicesList = services.length > 0 
+        ? services.map(service => `- ${service.name} (${service.category})`).join('\n')
+        : '- No specific services selected';
 
-        // Include calendar event information in plain text
-        const calendarEventInfo = calendar_event_id ? `
+    // Include calendar event information in plain text
+    const calendarEventInfo = calendar_event_id ? `
 CALENDAR EVENT:
 Event ID: ${calendar_event_id}
 ${calendar_event_link ? `View in Google Calendar: ${calendar_event_link}` : ''}
 ` : '';
 
-        // Include calendar event ID in action URLs
-        const calendarEventParam = calendar_event_id ? `?calendar_event_id=${calendar_event_id}` : '';
-        
-        const actionInstructions = action === 'created' 
-            ? `\n\nPLEASE CONFIRM YOUR BOOKING:\nTo accept: Visit ${process.env.FRONTEND_URL || 'http://localhost:3000'}/booking/accept/${booking_id}${calendarEventParam}\nTo decline: Visit ${process.env.FRONTEND_URL || 'http://localhost:3000'}/booking/decline/${booking_id}${calendarEventParam}`
-            : '';
+    // Include calendar event ID in action URLs
+    const calendarEventParam = calendar_event_id ? `?calendar_event_id=${calendar_event_id}` : '';
+    
+    const actionInstructions = action === 'created' 
+        ? `\n\nPLEASE CONFIRM YOUR BOOKING:\nTo accept: Visit ${process.env.FRONTEND_URL || 'http://localhost:3000'}/booking/accept/${booking_id}${calendarEventParam}\nTo decline: Visit ${process.env.FRONTEND_URL || 'http://localhost:3000'}/booking/decline/${booking_id}${calendarEventParam}`
+        : '';
 
-        return `
+    return `
 BOOKING ${action.toUpperCase()} - ${branchName.toUpperCase()}
 
 BRANCH INFORMATION:
@@ -406,195 +402,198 @@ If you have any questions, please contact us at ${branchPhone} or reply to this 
 
 This is an automated email from ${branchName} booking system.
 Generated on: ${moment.tz('Asia/Manila').format('MMMM Do YYYY, h:mm A')}`;
+}
+
+// Send booking confirmation email
+async function sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, action = 'created') {
+    // Check if we have branch-specific email credentials
+    const hasBranchCredentials = branchDetails.email && branchDetails.set_password;
+    
+    // if no branch credentials, use global transporter
+    if ( !hasBranchCredentials) {
+        console.warn('Email transporter not available and no branch credentials. Skipping email send.');
+        return {
+            success: false,
+            error: 'Email transporter not initialized and no branch credentials',
+            skipped: true
+        };
     }
 
-    // Send booking confirmation email
-    async sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, action = 'created') {
-        // Check if we have branch-specific email credentials
-        const hasBranchCredentials = branchDetails.email && branchDetails.set_password;
-        
-        // if no branch credentials, use global transporter
-        if ( !hasBranchCredentials) {
-            console.warn('Email transporter not available and no branch credentials. Skipping email send.');
+    try {
+        const { email: clientEmail } = clientDetails;
+        const { name: branchName } = branchDetails;
+
+        if (!clientEmail) {
             return {
                 success: false,
-                error: 'Email transporter not initialized and no branch credentials',
+                error: 'Client email not provided',
                 skipped: true
             };
         }
 
-        try {
-            const { email: clientEmail } = clientDetails;
-            const { name: branchName } = branchDetails;
-
-            if (!clientEmail) {
-                return {
-                    success: false,
-                    error: 'Client email not provided',
-                    skipped: true
-                };
-            }
-
-            // Create branch-specific transporter if credentials are provided
-            let transporter = this.transporter;
-            if (hasBranchCredentials) {
-                try {
-                    console.log(`Creating branch-specific email transporter for ${branchName}`);
-                    transporter = nodemailer.createTransport({
-                        host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-                        port: process.env.EMAIL_PORT || 587,
-                        secure: process.env.EMAIL_SECURE === 'true',
-                        auth: {
-                            user: branchDetails.email,
-                            pass: branchDetails.set_password
-                        },
-                        tls: {
-                            rejectUnauthorized: false
-                        }
-                    });
-                    
-                    // Test the branch-specific connection
-                    await transporter.verify();
-                    console.log(`Branch-specific email transporter verified successfully for ${branchName}`);
-                } catch (error) {
-                    console.error(`Error creating branch-specific email transporter for ${branchName}:`, error);
-                    // Fall back to global transporter if branch-specific fails
-                    if (!this.transporter) {
-                        return {
-                            success: false,
-                            error: `Branch email credentials failed and no global transporter available: ${error.message}`,
-                            skipped: true
-                        };
+        // Create branch-specific transporter if credentials are provided
+        let emailTransporter = transporter;
+        if (hasBranchCredentials) {
+            try {
+                console.log(`Creating branch-specific email transporter for ${branchName}`);
+                emailTransporter = nodemailer.createTransport({
+                    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+                    port: process.env.EMAIL_PORT || 587,
+                    secure: process.env.EMAIL_SECURE === 'true',
+                    auth: {
+                        user: branchDetails.email,
+                        pass: branchDetails.set_password
+                    },
+                    tls: {
+                        rejectUnauthorized: false
                     }
-                    console.log(`Falling back to global email transporter for ${branchName}`);
+                });
+                
+                // Test the branch-specific connection
+                await emailTransporter.verify();
+                console.log(`Branch-specific email transporter verified successfully for ${branchName}`);
+            } catch (error) {
+                console.error(`Error creating branch-specific email transporter for ${branchName}:`, error);
+                // Fall back to global transporter if branch-specific fails
+                if (!transporter) {
+                    return {
+                        success: false,
+                        error: `Branch email credentials failed and no global transporter available: ${error.message}`,
+                        skipped: true
+                    };
                 }
+                console.log(`Falling back to global email transporter for ${branchName}`);
             }
-
-            const subject = action === 'created' 
-                ? `📅 Booking Confirmation - ${branchName}`
-                : `📝 Booking Update - ${branchName}`;
-
-            const htmlContent = this.generateBookingEmailHTML(bookingData, clientDetails, branchDetails, servicesDetails, action);
-            const textContent = this.generateBookingEmailText(bookingData, clientDetails, branchDetails, servicesDetails, action);
-
-            const mailOptions = {
-                from: `"${branchName} Booking System" <${hasBranchCredentials ? branchDetails.email : process.env.EMAIL_USER}>`,
-                to: clientEmail,
-                subject: subject,
-                text: textContent,
-                html: htmlContent,
-                headers: {
-                    'X-Booking-ID': bookingData.booking_id,
-                    'X-Branch-Name': branchName,
-                    'X-Action': action
-                }
-            };
-
-            // Send email using the appropriate transporter
-            const result = await transporter.sendMail(mailOptions);
-
-            console.log(`Booking email sent successfully to ${clientEmail} for booking ${bookingData.booking_id} using ${hasBranchCredentials ? 'branch-specific' : 'global'} credentials`);
-            
-            return {
-                success: true,
-                messageId: result.messageId,
-                recipient: clientEmail,
-                action: action,
-                booking_id: bookingData.booking_id,
-                branch_name: branchName,
-                sent_at: moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss'),
-                credentials_used: hasBranchCredentials ? 'branch-specific' : 'global'
-            };
-
-        } catch (error) {
-            console.error('Error sending booking email:', error);
-            
-            // Provide more helpful error messages
-            let errorMessage = error.message;
-            if (error.code === 'ENOTFOUND') {
-                errorMessage = `Email server not found. Please check your EMAIL_HOST configuration (current: ${process.env.EMAIL_HOST}). Use full SMTP address like 'smtp.gmail.com'`;
-            } else if (error.code === 'EAUTH') {
-                errorMessage = hasBranchCredentials 
-                    ? `Branch email authentication failed. Please check the email and password for branch ${branchDetails.name}.`
-                    : 'Email authentication failed. Please check your EMAIL_USER and EMAIL_PASS credentials.';
-            } else if (error.code === 'ECONNECTION') {
-                errorMessage = 'Failed to connect to email server. Please check your EMAIL_HOST and EMAIL_PORT settings.';
-            }
-            
-            return {
-                success: false,
-                error: errorMessage,
-                recipient: clientDetails.email,
-                action: action,
-                booking_id: bookingData.booking_id,
-                branch_name: branchDetails.name,
-                errorCode: error.code,
-                credentials_used: hasBranchCredentials ? 'branch-specific' : 'global'
-            };
         }
-    }
 
-    // Send booking confirmation email (for new bookings)
-    async sendBookingConfirmation(bookingData, clientDetails, branchDetails, servicesDetails) {
-        return this.sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'created');
-    }
+        const subject = action === 'created' 
+            ? `📅 Booking Confirmation - ${branchName}`
+            : `📝 Booking Update - ${branchName}`;
 
-    // Send booking update email (for updated bookings)
-    async sendBookingUpdate(bookingData, clientDetails, branchDetails, servicesDetails) {
-        return this.sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'updated');
-    }
+        const htmlContent = generateBookingEmailHTML(bookingData, clientDetails, branchDetails, servicesDetails, action);
+        const textContent = generateBookingEmailText(bookingData, clientDetails, branchDetails, servicesDetails, action);
 
-    // Send booking completion email
-    async sendBookingCompletion(bookingData, clientDetails, branchDetails, servicesDetails) {
-        return this.sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'completed');
-    }
+        const mailOptions = {
+            from: `"${branchName} Booking System" <${hasBranchCredentials ? branchDetails.email : process.env.EMAIL_USER}>`,
+            to: clientEmail,
+            subject: subject,
+            text: textContent,
+            html: htmlContent,
+            headers: {
+                'X-Booking-ID': bookingData.booking_id,
+                'X-Branch-Name': branchName,
+                'X-Action': action
+            }
+        };
 
-    // Send booking cancellation email
-    async sendBookingCancellation(bookingData, clientDetails, branchDetails, servicesDetails) {
-        return this.sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'cancelled');
-    }
+        // Send email using the appropriate transporter
+        const result = await emailTransporter.sendMail(mailOptions);
 
-    // Send reminder email
-    async sendBookingReminder(bookingData, clientDetails, branchDetails, servicesDetails) {
-        return this.sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'reminder');
-    }
-
-    // Send calendar event update email (when calendar event is created/updated)
-    async sendCalendarEventUpdate(bookingData, clientDetails, branchDetails, servicesDetails, action = 'created') {
-        return this.sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, `calendar_${action}`);
-    }
-
-    // Get calendar event information for email templates
-    getCalendarEventInfo(bookingData) {
-        const { calendar_event_id, calendar_event_link } = bookingData;
+        console.log(`Booking email sent successfully to ${clientEmail} for booking ${bookingData.booking_id} using ${hasBranchCredentials ? 'branch-specific' : 'global'} credentials`);
         
-        if (!calendar_event_id) {
-            return {
-                hasCalendarEvent: false,
-                eventId: null,
-                eventLink: null,
-                calendarSection: '',
-                actionUrlParams: ''
-            };
-        }
-
         return {
-            hasCalendarEvent: true,
-            eventId: calendar_event_id,
-            eventLink: calendar_event_link,
-            // calendarSection: `
-            // <div class="calendar-info">
-            //     <h3>📅 Calendar Event</h3>
-            //     <p><strong>Event ID:</strong> ${calendar_event_id}</p>
-            //     ${calendar_event_link ? `<p><a href="${calendar_event_link}" target="_blank" style="color: #2196f3; text-decoration: none;">📱 View in Google Calendar</a></p>` : ''}
-            // </div>
-            // `,
-            actionUrlParams: `?calendar_event_id=${calendar_event_id}`
+            success: true,
+            messageId: result.messageId,
+            recipient: clientEmail,
+            action: action,
+            booking_id: bookingData.booking_id,
+            branch_name: branchName,
+            sent_at: moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss'),
+            credentials_used: hasBranchCredentials ? 'branch-specific' : 'global'
+        };
+
+    } catch (error) {
+        console.error('Error sending booking email:', error);
+        
+        // Provide more helpful error messages
+        let errorMessage = error.message;
+        if (error.code === 'ENOTFOUND') {
+            errorMessage = `Email server not found. Please check your EMAIL_HOST configuration (current: ${process.env.EMAIL_HOST}). Use full SMTP address like 'smtp.gmail.com'`;
+        } else if (error.code === 'EAUTH') {
+            errorMessage = hasBranchCredentials 
+                ? `Branch email authentication failed. Please check the email and password for branch ${branchDetails.name}.`
+                : 'Email authentication failed. Please check your EMAIL_USER and EMAIL_PASS credentials.';
+        } else if (error.code === 'ECONNECTION') {
+            errorMessage = 'Failed to connect to email server. Please check your EMAIL_HOST and EMAIL_PORT settings.';
+        }
+        
+        return {
+            success: false,
+            error: errorMessage,
+            recipient: clientDetails.email,
+            action: action,
+            booking_id: bookingData.booking_id,
+            branch_name: branchDetails.name,
+            errorCode: error.code,
+            credentials_used: hasBranchCredentials ? 'branch-specific' : 'global'
         };
     }
 }
 
-// Create singleton instance
-const emailService = new EmailService();
+// Send booking confirmation email (for new bookings)
+async function sendBookingConfirmation(bookingData, clientDetails, branchDetails, servicesDetails) {
+    return sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'created');
+}
 
-module.exports = emailService; 
+// Send booking update email (for updated bookings)
+async function sendBookingUpdate(bookingData, clientDetails, branchDetails, servicesDetails) {
+    return sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'updated');
+}
+
+// Send booking completion email
+async function sendBookingCompletion(bookingData, clientDetails, branchDetails, servicesDetails) {
+    return sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'completed');
+}
+
+// Send booking cancellation email
+async function sendBookingCancellation(bookingData, clientDetails, branchDetails, servicesDetails) {
+    return sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'cancelled');
+}
+
+// Send reminder email
+async function sendBookingReminder(bookingData, clientDetails, branchDetails, servicesDetails) {
+    return sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, 'reminder');
+}
+
+// Send calendar event update email (when calendar event is created/updated)
+async function sendCalendarEventUpdate(bookingData, clientDetails, branchDetails, servicesDetails, action = 'created') {
+    return sendBookingEmail(bookingData, clientDetails, branchDetails, servicesDetails, `calendar_${action}`);
+}
+
+// Get calendar event information for email templates
+function getCalendarEventInfo(bookingData) {
+    const { calendar_event_id, calendar_event_link } = bookingData;
+    
+    if (!calendar_event_id) {
+        return {
+            hasCalendarEvent: false,
+            eventId: null,
+            eventLink: null,
+            calendarSection: '',
+            actionUrlParams: ''
+        };
+    }
+
+    return {
+        hasCalendarEvent: true,
+        eventId: calendar_event_id,
+        eventLink: calendar_event_link,
+        actionUrlParams: `?calendar_event_id=${calendar_event_id}`
+    };
+}
+
+// Export all functions
+module.exports = {
+    initializeTransporter,
+    testConnection,
+    generateBookingEmailHTML,
+    generateBookingEmailText,
+    sendBookingEmail,
+    sendBookingConfirmation,
+    sendBookingUpdate,
+    sendBookingCompletion,
+    sendBookingCancellation,
+    sendBookingReminder,
+    sendCalendarEventUpdate,
+    getCalendarEventInfo
+}; 
