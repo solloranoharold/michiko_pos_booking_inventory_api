@@ -1,4 +1,4 @@
-require("dotenv").config();
+// Environment variables loaded centrally in config/env.js
 const admin = require('../firebaseAdmin');
 const { v4: uuidv4 } = require('uuid');
 const express = require('express');
