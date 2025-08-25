@@ -1,9 +1,10 @@
 const express = require('express');
-var serveIndex = require('serve-index')
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const fs = require('fs');
 const path = require('path');
+const config = require('./config/env'); // Add environment config import
+
+// Import routers
 const clientsRouter = require('./routers/clients');
 const accountsRouter = require('./routers/account');
 const branchesRouter = require('./routers/branches');
@@ -44,7 +45,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use('/ftp', express.static('images'), serveIndex('images', {'icons': true, 'view': 'details'}))
+// app.use('/ftp', express.static('images'), serveIndex('images', {'icons': true, 'view': 'details'}))
 
 // Serve static images
 // app.use('/images', express.static(path.join(__dir name, 'images')));
@@ -83,9 +84,9 @@ app.get('/', (req, res) => {
   res.send('Hello World');
 });
 
-
 // Add verifyToken endpoint
 app.post('/api/verifyToken', verifyToken);
+
 // Apply Authorization header middleware globally
 app.use('/api',requireAuthHeader);
 
@@ -105,7 +106,15 @@ app.use('/api/payment-methods', paymentMethodsRouter);
 app.use('/api/bookings', bookingRouter);
 app.use('/api/time-slots', timeSlotRouter);
 
+// Vercel-compatible server setup
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-});
+
+// Only start the server if not running on Vercel
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+// Export for Vercel
+module.exports = app;

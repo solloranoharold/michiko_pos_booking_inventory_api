@@ -19,5 +19,7 @@
     "index.js": {
       "maxDuration": 30
     }
-  }
+  },
+  "regions": ["iad1"],
+  "public": false
 } 
