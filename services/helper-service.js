@@ -14,9 +14,13 @@ function generateInvoiceId() {
 function calculateCommission(amount, commissionRate = 0.10) {
   return parseFloat((amount * commissionRate).toFixed(2));
 }
-
+// create a function to convert search to ProperCase 
+function convertToProperCase(search) {
+  return search.toLowerCase().split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+}
 module.exports = {
   getCurrentDate,
   generateInvoiceId,
-  calculateCommission
+  calculateCommission,
+  convertToProperCase
 };

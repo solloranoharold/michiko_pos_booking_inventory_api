@@ -11,6 +11,8 @@ const ExcelJS = require('exceljs');
 const COLLECTION = 'otcProducts';
 const USED_QUANTITIES_COLLECTION = 'used_quantities';
 
+const { convertToProperCase } = require('../services/helper-service');
+
 // Helper function to track used quantities
 async function trackUsedQuantities(productId, productName, branchId, oldQuantity, newQuantity, reason = 'manual_update') {
   try {
@@ -24,7 +26,7 @@ async function trackUsedQuantities(productId, productName, branchId, oldQuantity
         transaction_id: null, // No transaction ID for manual updates
         branch_id: branchId,
         item_id: productId,
-        item_name: productName,
+        item_name: convertToProperCase(productName),
         item_type: 'otc_product',
         quantity_used: quantityDifference > 0 ? quantityDifference : 0, // Positive for decreases
         quantity_added: quantityDifference < 0 ? Math.abs(quantityDifference) : 0, // Positive for increases
@@ -77,9 +79,22 @@ router.post('/insertProduct', async (req, res) => {
       return res.status(400).json({ error: 'Quantity must be a non-negative number' });
     }
 
+    // Validation: Check if branch exists in Firestore
+    const otcProducts = await admin.firestore().collection(COLLECTION)
+    .where('branch_id', '==', branch_id)
+    .where('name', '==', convertToProperCase(name))
+    .where('category', '==', category)
+    .get();
+    if (otcProducts.docs.length > 0) {
+      return res.status(400).json({ 
+        error: 'OTC product already exists in this branch and category', 
+        branch_id: branch_id 
+      });
+    }
+
     const id = uuidv4();
     const date_created = new Date().toISOString();
-    const data = { id, name, price, retail_price, quantity, branch_id, date_created, min_quantity, status, brand, category };
+    const data = { id, name:convertToProperCase(name), price, retail_price, quantity, branch_id, date_created, min_quantity, status, brand, category };
     await admin.firestore().collection(COLLECTION).doc(id).set(data);
     res.status(201).json({ message: 'OTC product created', id });
   } catch (error) {
@@ -99,8 +114,8 @@ router.get('/getAllProducts', async (req, res) => {
     // Apply all filters that are present (search, branch_id, category)
     if (search) {
       queryRef = queryRef
-        .where(searchField, '>=', search)
-        .where(searchField, '<', search + '\uf8ff');
+        .where(searchField, '>=', convertToProperCase(search))
+        .where(searchField, '<', convertToProperCase(search) + '\uf8ff');
     }
     if (branch_id) {
       queryRef = queryRef.where('branch_id', '==', branch_id);
@@ -142,8 +157,8 @@ router.get('/getAllProducts', async (req, res) => {
     // Apply all filters that are present (search, branch_id, category) in the same order as above
     if (search) {
       countQuery = countQuery
-        .where(searchField, '>=', search)
-        .where(searchField, '<', search + '\uf8ff');
+        .where(searchField, '>=', convertToProperCase(search))
+        .where(searchField, '<', convertToProperCase(search) + '\uf8ff');
     }
     if (branch_id) {
       countQuery = countQuery.where('branch_id', '==', branch_id);
@@ -307,7 +322,7 @@ router.put('/updateProduct/:id', async (req, res) => {
     if (newQuantity !== oldQuantity) {
       await trackUsedQuantities(
         req.params.id,
-        currentProduct.name,
+        convertToProperCase(currentProduct.name),
         currentProduct.branch_id,
         oldQuantity,
         newQuantity,

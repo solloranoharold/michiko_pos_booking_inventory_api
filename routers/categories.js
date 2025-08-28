@@ -6,6 +6,8 @@ const router = express.Router();
 const firestore = admin.firestore();
 const CATEGORIES_COLLECTION = 'categories';
 
+const { convertToProperCase } = require('../services/helper-service');
+
 // Helper to get current date string
 function now() {
   return new Date().toISOString();
@@ -34,7 +36,7 @@ router.post('/insertCategory', async (req, res) => {
     const date_created = now();
     const categoryData = {
       id,
-      name,
+      name: convertToProperCase(name),
       branch_id,
       type,
       date_created,
@@ -70,8 +72,8 @@ router.get('/getAllCategories', async (req, res) => {
     // For search, add range filter and orderBy on the search field
     if (search) {
       queryRef = queryRef
-        .where('name', '>=', search)
-        .where('name', '<', search + '\uf8ff')
+        .where('name', '>=', convertToProperCase(search))
+        .where('name', '<', convertToProperCase(search) + '\uf8ff')
         .orderBy('name')
         .orderBy('date_created', 'desc');
     } else {
@@ -148,7 +150,7 @@ router.put('/updateCategory/:id', async (req, res) => {
     }
 
     const updateData = {
-      name: name || prevData.name,
+      name: convertToProperCase(name) || prevData.name,
       branch_id: branch_id || prevData.branch_id,
       type: type || prevData.type,
       doc_type: 'CATEGORY'

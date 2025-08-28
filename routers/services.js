@@ -10,6 +10,8 @@ const ExcelJS = require('exceljs');
 const router = express.Router();
 const SERVICES_COLLECTION = 'services';
 
+const { convertToProperCase } = require('../services/helper-service');
+
 router.get('/', (req, res) => {
   res.send('Services API is running');
 });
@@ -26,6 +28,19 @@ router.post('/insertService', async (req, res) => {
       });
     }
 
+     // Validation: Check if branch exists in Firestore
+     const services = await admin.firestore().collection(SERVICES_COLLECTION)
+     .where('branch_id', '==', branch_id)
+     .where('name', '==', convertToProperCase(name))
+     .where('category', '==', category)
+     .get();
+     if (services.docs.length > 0) {
+       return res.status(400).json({ 
+         error: 'Service already exists in this branch and category', 
+         branch_id: branch_id 
+       });
+     }
+
     // Validate price is a number
     if (isNaN(price) || price <= 0) {
       return res.status(400).json({ error: 'Price must be a positive number' });
@@ -37,7 +52,7 @@ router.post('/insertService', async (req, res) => {
     
     const serviceData = {
       id: serviceId,
-      name,
+      name: convertToProperCase(name),
       description,
       category,
       price: parseFloat(price),
@@ -68,6 +83,7 @@ router.post('/insertService', async (req, res) => {
   }
 });
 
+
 // Get all services with pagination, search, and filtering
 router.get('/getAllServices', async (req, res) => {
   try {
@@ -80,8 +96,8 @@ router.get('/getAllServices', async (req, res) => {
     // Apply all filters that are present (search, branch_id, category)
     if (search) {
       queryRef = queryRef
-        .where(searchField, '>=', search)
-        .where(searchField, '<', search + '\uf8ff');
+        .where(searchField, '>=', convertToProperCase(search))
+        .where(searchField, '<', convertToProperCase(search) + '\uf8ff');
     }
     if (branch_id) {
       queryRef = queryRef.where('branch_id', '==', branch_id);
@@ -110,8 +126,8 @@ router.get('/getAllServices', async (req, res) => {
     // Apply all filters that are present (search, branch_id, category) in the same order as above
     if (search) {
       countQuery = countQuery
-        .where(searchField, '>=', search)
-        .where(searchField, '<', search + '\uf8ff');
+        .where(searchField, '>=', convertToProperCase(search))
+        .where(searchField, '<', convertToProperCase(search) + '\uf8ff');
     }
     if (branch_id) {
       countQuery = countQuery.where('branch_id', '==', branch_id);
@@ -243,7 +259,7 @@ router.put('/updateService/:id', async (req, res) => {
     }
 
     const updateData = {
-      name,
+      name: convertToProperCase(name),
       description,
       category,
       price: parseFloat(price),
@@ -983,7 +999,7 @@ router.post('/uploadServices', upload, async (req, res) => {
           
           const serviceData = {
             id: serviceId,
-            name: row.name.trim(),
+            name: convertToProperCase(row.name.trim()),
             description: row.description.trim(),
             category: await getCategoryId(row.category, branch_id),
             price: price,

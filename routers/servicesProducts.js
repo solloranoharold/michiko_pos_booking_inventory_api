@@ -5,6 +5,8 @@ const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const path = require('path');
 
+const { convertToProperCase } = require('../services/helper-service');
+
 // Import helper functions
 const {
   trackUsedQuantities,
@@ -22,9 +24,32 @@ const {
 router.post('/insertServiceProduct', async (req, res) => {
   try {
     const { name, category, unit, quantity, total_value, status, branch_id, unit_value, min_quantity, price, brand } = req.body;
+    
+    // Validation: Check if required fields exist
+    if (!name || !branch_id) {
+      return res.status(400).json({ 
+        error: 'Missing required fields', 
+        required: ['name', 'branch_id'],
+        received: { name: !!name, branch_id: !!branch_id }
+      });
+    }
+    
+    // Validation: Check if branch exists in Firestore
+    const servicesProducts = await admin.firestore().collection(COLLECTION)
+    .where('branch_id', '==', branch_id)
+    .where('name', '==', convertToProperCase(name))
+    .where('category', '==', category)
+    .get();
+    if (servicesProducts.docs.length > 0) {
+      return res.status(400).json({ 
+        error: 'Service product already exists in this branch and category', 
+        branch_id: branch_id 
+      });
+    }
+    
     const id = uuidv4();
     const date_created = new Date().toISOString();
-    const data = { id, name, category, unit, quantity, total_value, unit_value, min_quantity, price, brand, date_created, status, branch_id };
+    const data = { id, name:convertToProperCase(name), category, unit, quantity, total_value, unit_value, min_quantity, price, brand, date_created, status, branch_id };
     await admin.firestore().collection(COLLECTION).doc(id).set(data);
     res.status(201).json({ message: 'Service product created', id });
   } catch (error) {
@@ -44,8 +69,8 @@ router.get('/getAllServicesProducts', async (req, res) => {
     // Apply all filters that are present (search, branch_id, category)
     if (search) {
       queryRef = queryRef
-        .where(searchField, '>=', search)
-        .where(searchField, '<', search + '\uf8ff');
+        .where(searchField, '>=', convertToProperCase(search))
+        .where(searchField, '<', convertToProperCase(search) + '\uf8ff');
     }
     if (branch_id) {
       queryRef = queryRef.where('branch_id', '==', branch_id);
@@ -74,8 +99,8 @@ router.get('/getAllServicesProducts', async (req, res) => {
     // Apply all filters that are present (search, branch_id, category) in the same order as above
     if (search) {
       countQuery = countQuery
-        .where(searchField, '>=', search)
-        .where(searchField, '<', search + '\uf8ff');
+        .where(searchField, '>=', convertToProperCase(search))
+        .where(searchField, '<', convertToProperCase(search) + '\uf8ff');
     }
     if (branch_id) {
       countQuery = countQuery.where('branch_id', '==', branch_id);
@@ -141,7 +166,7 @@ router.put('/updateServiceProduct/:id', async (req, res) => {
     const oldQuantity = currentProduct.quantity || 0;
     const newQuantity = quantity !== undefined ? quantity : oldQuantity;
     
-    const updateData = { name, category, unit, quantity, total_value, status, branch_id, unit_value, min_quantity, price, brand };
+    const updateData = { name:convertToProperCase(name), category, unit, quantity, total_value, status, branch_id, unit_value, min_quantity, price, brand };
     // Remove undefined fields
     Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
     
@@ -153,7 +178,7 @@ router.put('/updateServiceProduct/:id', async (req, res) => {
     if (newQuantity !== oldQuantity) {
       await trackUsedQuantities(
         req.params.id,
-        currentProduct.name,
+        convertToProperCase(currentProduct.name),
         currentProduct.branch_id,
         oldQuantity,
         newQuantity,
@@ -685,7 +710,7 @@ router.post('/updateUsedQuantity/:id', async (req, res) => {
     // Track the used quantity
     await trackUsedQuantities(
       req.params.id,
-      currentProduct.name,
+      convertToProperCase(currentProduct.name),
       currentProduct.branch_id,
       currentQuantity,
       newQuantity,

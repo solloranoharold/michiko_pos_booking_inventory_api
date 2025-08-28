@@ -8,6 +8,8 @@ const router = express.Router();
 const firestore = admin.firestore();
 const EXPENSES_COLLECTION = 'expenses';
 
+const { convertToProperCase } = require('../services/helper-service');
+
 // Helper to get current date string
 function now() {
   return new Date().toISOString();
@@ -40,6 +42,17 @@ router.post('/insertExpense', async (req, res) => {
         error: 'Branch not found' 
       });
     }
+    // Validation: Check if expense already exists in Firestore
+    const expenses = await firestore.collection(EXPENSES_COLLECTION)
+    .where('branch_id', '==', branch_id)
+    .where('name', '==', convertToProperCase(name))
+    .get();
+    if (expenses.docs.length > 0) {
+      return res.status(400).json({ 
+        error: 'Expense already exists in this branch', 
+        branch_id: branch_id 
+      });
+    }
 
     const id = uuidv4();
     const date_created = now();
@@ -49,7 +62,7 @@ router.post('/insertExpense', async (req, res) => {
       branch_id,
       category,
       amount: numericAmount,
-      name,
+      name: convertToProperCase(name),
       date_created,
       doc_type: 'EXPENSE',
       status: 'active'
@@ -88,7 +101,8 @@ router.get('/getAllExpenses', async (req, res) => {
       queryRef = queryRef.where('branch_id', '==', branch_id);
     }
     if(search){
-      queryRef = queryRef.where('name', '==', search);
+      queryRef = queryRef.where('name', '>=', convertToProperCase(search))
+      .where('name', '<', convertToProperCase(search) + '\uf8ff');
     }
     
 
@@ -245,7 +259,7 @@ router.put('/updateExpense/:id', async (req, res) => {
       if (!name.trim()) {
         return res.status(400).json({ error: 'Name cannot be empty' });
       }
-      updateData.name = name;
+      updateData.name = convertToProperCase(name);
     }
 
     if (amount !== undefined) {

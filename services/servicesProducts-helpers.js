@@ -3,6 +3,8 @@ const { v4: uuidv4 } = require('uuid');
 const xlsx = require('xlsx');
 const ExcelJS = require('exceljs');
 
+const { convertToProperCase } = require('../services/helper-service');
+
 const COLLECTION = 'services_products';
 const USED_QUANTITIES_COLLECTION = 'used_quantities';
 
@@ -19,7 +21,7 @@ async function trackUsedQuantities(productId, productName, branchId, oldQuantity
         transaction_id: null, // No transaction ID for manual updates
         branch_id: branchId,
         item_id: productId,
-        item_name: productName,
+        item_name: convertToProperCase(productName),
         item_type: 'services_product',
         quantity_used: quantityDifference > 0 ? quantityDifference : 0, // Positive for decreases
         quantity_added: quantityDifference < 0 ? Math.abs(quantityDifference) : 0, // Positive for increases
@@ -342,7 +344,7 @@ function createProductData(row, productId, branch_id, categoryId, validatedData)
   
   return {
     id: productId,
-    name: row.name.trim(),
+    name: convertToProperCase(row.name.trim()),
     category: categoryId,
     unit: row.unit.trim(),
     quantity: validatedData.quantity,

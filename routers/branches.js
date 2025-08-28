@@ -3,7 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const express = require('express');
 const moment = require('moment');
 const { createBranchCalendar, updateBranchCalendar, deleteBranchCalendar } = require('../services/branch-calendar-service');
-
+const { convertToProperCase } = require('../services/helper-service');
 const router = express.Router();
 const firestore = admin.firestore();
 const BRANCHES_COLLECTION = 'branches';
@@ -44,11 +44,12 @@ router.post('/insertBranch', async (req, res) => {
     }
     const id = uuidv4();
     const date_created = now();
+    name = convertToProperCase(name);
     
     const branchData = {
       id,
       email,
-      name,
+      name: name,
       address,
       contactno,
       created_by: created_by ,
@@ -148,8 +149,8 @@ router.get('/getAllBranches', async (req, res) => {
       // For search, add range filter and orderBy on the search field
       if (search) {
         queryRef = queryRef
-          .where(searchField, '>=', search)
-          .where(searchField, '<', search + '\uf8ff')
+          .where(searchField, '>=', convertToProperCase(search))
+          .where(searchField, '<', convertToProperCase(search) + '\uf8ff')
           .orderBy(searchField)
           .orderBy(orderField, 'desc');
       } else {
@@ -223,6 +224,8 @@ router.put('/updateBranch/:id', async (req, res) => {
     
     // Build update data object, only including fields that have values
     const updateData = {};
+
+    name = convertToProperCase(name);
     
     if (email !== undefined) updateData.email = email;
     if (name !== undefined) updateData.name = name;

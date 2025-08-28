@@ -7,6 +7,8 @@ const admin = require('../firebaseAdmin');
 const firestore = admin.firestore();
 const ACCOUNTS_COLLECTION = 'accounts';
 
+const { convertToProperCase } = require('../services/helper-service');
+
 // Helper to get current date in ISO format
 function getCurrentDate() {
   return new Date().toISOString();
@@ -245,7 +247,7 @@ router.put('/updateAccount/:email', async (req, res) => {
     if (status !== undefined) updateData.status = status;
     if (role !== undefined) updateData.role = role;
     if (branch_id !== undefined) updateData.branch_id = branch_id;
-    if (name !== undefined) updateData.name = name;
+    if (name !== undefined) updateData.name = convertToProperCase(name);
     if (government_ids !== undefined) updateData.government_ids = government_ids;
     if (position !== undefined) updateData.position = position;
     if (commission_rate !== undefined) updateData.commission_rate = role === 'staff' ? commission_rate : null;
