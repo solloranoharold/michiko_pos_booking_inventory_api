@@ -101,6 +101,23 @@ router.post('/registerClientPublic', async (req, res) => {
       return res.status(400).json({ error: 'Updated by field is required' });
     }
     
+    // Check if client with same email or fullname already exists
+    const existingClient = await firestore.collection(CLIENTS_COLLECTION)
+      .where('email', '==', email)
+      .get();
+    
+    if (!existingClient.empty) {
+      return res.status(409).json({ error: 'Client with this email already exists' });
+    }
+    
+    const existingName = await firestore.collection(CLIENTS_COLLECTION)
+      .where('fullname', '==', fullname)
+      .get();
+    
+    if (!existingName.empty) {
+      return res.status(409).json({ error: 'Client with this full name already exists' });
+    }
+    
     // Generate unique client ID
     const clientId = await generateClientId();
     
@@ -114,14 +131,13 @@ router.post('/registerClientPublic', async (req, res) => {
     const dateUpdated = new Date().toISOString();
     const clientData = { 
       clientId, 
-      fullname, 
+      fullname: convertToProperCase(fullname), 
       contactNo, 
       address, 
       email, 
       dateCreated, 
       dateUpdated, 
-      status, 
-      updated_by, 
+      status:'active', 
       notes: notes || [],
       social_media: social_media || {},
       doc_type: 'CLIENTS' 
@@ -143,31 +159,46 @@ router.post('/insertClient', async (req, res) => {
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
     }
+    if (!fullname) {
+      return res.status(400).json({ error: 'Full name is required' });
+    }
     if (!updated_by) {
       return res.status(400).json({ error: 'Updated by field is required' });
+    }
+    
+    // Check if client with same email or fullname already exists
+    const existingClient = await firestore.collection(CLIENTS_COLLECTION)
+      .where('email', '==', email)
+      .get();
+    
+    if (!existingClient.empty) {
+      return res.status(409).json({ error: 'Client with this email already exists' });
+    }
+    
+    const existingName = await firestore.collection(CLIENTS_COLLECTION)
+      .where('fullname', '==', fullname)
+      .get();
+    
+    if (!existingName.empty) {
+      return res.status(409).json({ error: 'Client with this full name already exists' });
     }
     
     // Generate unique client ID
     const clientId = await generateClientId();
     
     const clientRef = firestore.collection(CLIENTS_COLLECTION).doc(clientId);
-    const clientSnap = await clientRef.get();
-    if (clientSnap.exists) {
-      return res.status(409).json({ error: 'Client with this email already exists' });
-    }
-    
     
     const dateCreated = new Date().toISOString();
     const dateUpdated = new Date().toISOString();
     const clientData = { 
       clientId, 
-      fullname, 
+      fullname: convertToProperCase(fullname), 
       contactNo, 
       address, 
       email, 
       dateCreated, 
       dateUpdated, 
-      status, 
+      status:'active', 
       updated_by, 
       notes: notes || [],
       social_media: social_media || {},
@@ -180,6 +211,10 @@ router.post('/insertClient', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+//create a function to convert search to ProperCase 
+function convertToProperCase(search) {
+  return search.toLowerCase().split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+}
 
 // Get all clients
 router.get('/getAllClients', async (req, res) => {
@@ -193,8 +228,8 @@ router.get('/getAllClients', async (req, res) => {
     // Apply search filter if present
     if (search) {
       queryRef = queryRef
-        .where(searchField, '>=', search)
-        .where(searchField, '<', search + '\uf8ff');
+        .where(searchField, '>=', convertToProperCase(search))
+        .where(searchField, '<', convertToProperCase(search) + '\uf8ff');
     }
 
     // Apply status filter if present
@@ -222,8 +257,8 @@ router.get('/getAllClients', async (req, res) => {
     // Apply search filter in the same order as above
     if (search) {
       countQuery = countQuery
-        .where(searchField, '>=', search)
-        .where(searchField, '<', search + '\uf8ff');
+        .where(searchField, '>=', convertToProperCase(search))
+        .where(searchField, '<', convertToProperCase(search) + '\uf8ff');
     }
     // Apply status filter in the same order as above
     if (status) {
@@ -264,7 +299,7 @@ router.get('/getEmailClient/:email', async (req, res) => {
     
     if (querySnapshot.empty) {
       console.log('No client found with email:', email);
-      return res.status(200).json({ data: null, message: 'Client not found' });
+      return res.status(200).json({ data: [] });
     }
     
     const clientDoc = querySnapshot.docs[0];
@@ -295,16 +330,17 @@ router.put('/updateClient/:email', async (req, res) => {
     const prevData = clientSnap.data();
     const dateUpdated = new Date().toISOString();
     const updateData = { 
-      fullname, 
+      fullname: convertToProperCase(fullname), 
       contactNo, 
       address, 
       status, 
       dateUpdated, 
       updated_by, 
-      notes: notes !== undefined ? notes : prevData.notes,
+      notes: notes !== undefined ? notes : "",
       social_media: social_media !== undefined ? social_media : prevData.social_media,
       doc_type: 'CLIENTS' 
     };
+    console.log(updateData , 'updateData')
     await clientRef.update(updateData);
     res.json({ id: req.params.email, ...prevData, ...updateData });
   } catch (error) {
@@ -699,7 +735,7 @@ router.post('/uploadClients', upload.single('file'), async (req, res) => {
           
           const clientData = {
             clientId,
-            fullname: cleanFullname,
+            fullname: convertToProperCase(cleanFullname),
             contactNo: cleanContactNo,
             address: cleanAddress,
             email: finalEmail,
@@ -1299,7 +1335,7 @@ router.put('/updateClientNote/:clientId/:noteIndex', imageUpload.array('images',
     
     // Update client document
     const updateData = {
-      notes: updatedNotes,
+      notes: updatedNotes || [],
       dateUpdated: new Date().toISOString(),
       updated_by: updated_by
     };

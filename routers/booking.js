@@ -5,929 +5,37 @@ const express = require('express');
 const moment = require('moment-timezone');
 // for calendar API
 const { google } = require('googleapis');
-const { calendarRateLimiter } = require('../calendar-rate-limiter');
+const { calendarRateLimiter } = require('../services/calendar-rate-limiter');
 
-// Robust emailService import with fallback
-let emailService;
-try {
-    emailService = require('../emailService.js');
-} catch (error) {
-    console.warn('Warning: emailService module not found, email functionality will be disabled:', error.message);
-    // Create a mock emailService to prevent crashes
-    emailService = {
-        sendBookingConfirmation: async () => ({ success: false, error: 'Email service not available' }),
-        sendBookingUpdate: async () => ({ success: false, error: 'Email service not available' }),
-        sendBookingCancellation: async () => ({ success: false, error: 'Email service not available' }),
-        sendBookingCompletion: async () => ({ success: false, error: 'Email service not available' }),
-        sendBookingEmail: async () => ({ success: false, error: 'Email service not available' }),
-        testConnection: async () => ({ success: false, error: 'Email service not available' })
-    };
-}
+// Import email service from services folder
+const { emailService } = require('../services/email-service');
+
+// Import helper functions from services folder
+const {
+    getBookingCalendarId,
+    getStatusBackgroundColor,
+    getCalendarColorId,
+    getCalendarColorName,
+    getEnhancedCalendarEvent,
+    getCustomBackgroundColor,
+    getCategoryDetails,
+    getClientDetails,
+    getBranchDetails,
+    getServicesDetails,
+    getMasterAdminEmails,
+    getBranchAuthorizedEmails,
+    shareCalendarWithMasterAdmins,
+    checkCalendarPermissions,
+    shareCalendarWithBranchAuthorizedUsers
+} = require('../services/booking-helpers.js');
 
 const router = express.Router();
 const firestore = admin.firestore();
 const BOOKINGS_COLLECTION = 'bookings';
-
-// Cache for calendar IDs by branch to avoid repeated setup
-let cachedCalendarIds = new Map();
-
-// Helper function to get or create a calendar for bookings by branch
-async function getBookingCalendarId(calendar, branchName = 'Default Branch') {
-    // Sanitize branch name for calendar usage
-    const sanitizedBranchName = branchName.replace(/[^a-zA-Z0-9\s-]/g, '').trim() || 'Default Branch';
-    
-    if (cachedCalendarIds.has(sanitizedBranchName)) {
-        return cachedCalendarIds.get(sanitizedBranchName);
-    }
-    
-    let calendarId = "";
-    
-    if (!calendarId) {
-        try {
-            // First, try to find an existing calendar for this branch
-            const calendarList = await calendar.calendarList.list();
-            const expectedCalendarName = `${sanitizedBranchName} - Bookings Calendar`;
-            const branchCalendar = calendarList.data.items?.find(cal => 
-                cal.summary === expectedCalendarName || 
-                cal.summary.includes(`${sanitizedBranchName}`) && cal.summary.includes('Booking')
-            );
-            
-            if (branchCalendar) {
-                calendarId = branchCalendar.id;
-                console.log(`Using existing calendar for ${sanitizedBranchName}:`, calendarId);
-            } else {
-                // Create a new calendar for this branch
-                const newCalendar = await calendar.calendars.insert({
-                    requestBody: {
-                        summary: expectedCalendarName,
-                        description: `Calendar for managing booking appointments at ${sanitizedBranchName}`,
-                        timeZone: 'Asia/Manila'
-                    }
-                });
-                calendarId = newCalendar.data.id;
-                console.log(`Created new calendar for ${sanitizedBranchName}:`, calendarId);
-                
-                // Share the newly created calendar with master_admin users
-                const sharingResult = await shareCalendarWithMasterAdmins(calendar, calendarId, sanitizedBranchName);
-                if (sharingResult.shared) {
-                    console.log(`Calendar shared with ${sharingResult.count} master_admin(s) for ${sanitizedBranchName}`);
-                } else {
-                    console.log(`Failed to share calendar with master_admin users for ${sanitizedBranchName}`);
-                }
-            }
-        } catch (calendarSetupError) {
-            console.error(`Error setting up calendar for ${sanitizedBranchName}:`, calendarSetupError.message);
-            // Fallback: use a generated calendar ID based on branch and service account
-            const serviceAccountId = (process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL || 'default').replace(/[@.]/g, '-');
-            calendarId = `bookings-${sanitizedBranchName.replace(/\s+/g, '-').toLowerCase()}-${serviceAccountId}`;
-            console.log(`Using fallback calendar ID for ${sanitizedBranchName}:`, calendarId);
-        }
-    }
-    
-    cachedCalendarIds.set(sanitizedBranchName, calendarId);
-    return calendarId;
-}
-
-// Helper function to get background color based on status
-function getStatusBackgroundColor(status) {
-    const statusColors = {
-        'scheduled': '#E3F2FD',     // Light Blue
-        'confirmed': '#E8F5E8',     // Light Green
-        'pending': '#FFF3E0',       // Light Orange
-        'cancelled': '#FFEBEE',     // Light Red
-        'completed': '#F3E5F5',     // Light Purple
-        'no-show': '#FAFAFA',       // Light Gray
-        'rescheduled': '#E1F5FE'    // Light Cyan
-    };
-    return statusColors[status?.toLowerCase()] || '#F5F5F5'; // Default light gray
-}
-
-// Helper function to get calendar color ID based on status
-function getCalendarColorId(status) {
-    // Google Calendar Color ID mapping
-    // Color IDs 1-11 are the default Google Calendar colors
-    // Each color ID corresponds to a specific color in Google Calendar
-    const colorMapping = {
-        // Primary booking statuses
-        'scheduled': '7',      // Blue - Default for new bookings
-        'confirmed': '10',     // Green - Confirmed appointments
-        'pending': '5',        // Yellow - Awaiting confirmation
-        'cancelled': '11',     // Red - Cancelled appointments
-        'completed': '9',      // Purple - Completed services
-        'no-show': '8',        // Gray - Client didn't show up
-        'rescheduled': '6',    // Orange - Rescheduled appointments
-        
-        // Additional statuses that might be used
-        'in-progress': '3',    // Teal - Service in progress
-        'waiting': '4',        // Pink - Client waiting
-        'late': '2',           // Red-Orange - Late arrival
-        'early': '1',          // Light Blue - Early arrival
-        'urgent': '11',        // Red - Urgent/emergency
-        'vip': '9',            // Purple - VIP client
-        'walk-in': '4',        // Pink - Walk-in appointments
-        'online': '6',         // Orange - Online bookings
-        'phone': '5',          // Yellow - Phone bookings
-        'referral': '3',       // Teal - Referral appointments
-        
-        // Payment-related statuses
-        'paid': '10',          // Green - Payment completed
-        'unpaid': '5',         // Yellow - Payment pending
-        'partial': '6',        // Orange - Partial payment
-        'refunded': '8',       // Gray - Refunded
-        
-        // Special statuses
-        'maintenance': '8',    // Gray - System maintenance
-        'holiday': '1',        // Light Blue - Holiday/closed
-        'training': '3',       // Teal - Staff training
-        'meeting': '7',        // Blue - Staff meetings
-        'break': '2'           // Red-Orange - Break time
-    };
-    
-    // Normalize status to lowercase and remove extra spaces
-    const normalizedStatus = status?.toLowerCase()?.trim();
-    
-    // Return mapped color ID or default to blue (ID: 7) for unknown statuses
-    return colorMapping[normalizedStatus] || '7';
-}
-
-// Helper function to get calendar color name for reference
-function getCalendarColorName(colorId) {
-    const colorNames = {
-        '1': 'Light Blue',
-        '2': 'Red-Orange', 
-        '3': 'Teal',
-        '4': 'Pink',
-        '5': 'Yellow',
-        '6': 'Orange',
-        '7': 'Blue',
-        '8': 'Gray',
-        '9': 'Purple',
-        '10': 'Green',
-        '11': 'Red'
-    };
-    return colorNames[colorId] || 'Unknown';
-}
-
-// Helper function to get enhanced calendar event with color information
-function getEnhancedCalendarEvent(eventData, status) {
-    const colorId = getCalendarColorId(status);
-    const colorName = getCalendarColorName(colorId);
-    
-    // Get custom color for full background (instead of just colorId dots)
-    const customColor = getCustomBackgroundColor(status);
-    
-    return {
-        ...eventData,
-        colorId: colorId, // Keep for fallback compatibility
-        // Use custom color for full background
-        color: customColor,
-        // Add color information to event description for better visibility
-        description: `${eventData.description || ''}\n\n📅 Status: ${status?.toUpperCase() || 'UNKNOWN'}\n🎨 Color: ${colorName} (ID: ${colorId})\n🌈 Background: ${customColor}`
-    };
-}
-
-// Helper function to get custom background colors for full event coloring
-function getCustomBackgroundColor(status) {
-    const customColors = {
-        // Primary booking statuses with full background colors
-        'scheduled': '#E3F2FD',     // Light Blue background
-        'confirmed': '#E8F5E8',     // Light Green background
-        'pending': '#FFF3E0',       // Light Orange background
-        'cancelled': '#FFEBEE',     // Light Red background
-        'completed': '#F3E5F5',     // Light Purple background
-        'no-show': '#FAFAFA',       // Light Gray background
-        'rescheduled': '#E1F5FE',   // Light Cyan background
-        
-        // Additional statuses
-        'in-progress': '#E0F2F1',   // Light Teal background
-        'waiting': '#FCE4EC',       // Light Pink background
-        'late': '#FFE0B2',          // Light Red-Orange background
-        'early': '#E1F5FE',         // Light Blue background
-        'urgent': '#FFCDD2',        // Light Red background
-        'vip': '#F3E5F5',           // Light Purple background
-        'walk-in': '#FCE4EC',       // Light Pink background
-        'online': '#FFF3E0',        // Light Orange background
-        'phone': '#FFF3E0',         // Light Yellow background
-        'referral': '#E0F2F1',      // Light Teal background
-        
-        // Payment-related statuses
-        'paid': '#E8F5E8',          // Light Green background
-        'unpaid': '#FFF3E0',        // Light Yellow background
-        'partial': '#FFF3E0',       // Light Orange background
-        'refunded': '#FAFAFA',      // Light Gray background
-        
-        // Special statuses
-        'maintenance': '#FAFAFA',    // Light Gray background
-        'holiday': '#E1F5FE',       // Light Blue background
-        'training': '#E0F2F1',      // Light Teal background
-        'meeting': '#E3F2FD',       // Light Blue background
-        'break': '#FFE0B2'          // Light Red-Orange background
-    };
-    
-    // Normalize status to lowercase and remove extra spaces
-    const normalizedStatus = status?.toLowerCase()?.trim();
-    
-    // Return custom color or default to light blue for unknown statuses
-    return customColors[normalizedStatus] || '#E3F2FD';
-}
-
-// Helper functions to fetch related data for calendar events
-async function getCategoryDetails(categoryId) {
+// create booking if client will book for himself
+router.post('/createBookingperBranchClient', async (req, res) => {
     try {
-        // Validate categoryId before making the Firestore call
-        if (!categoryId || typeof categoryId !== 'string' || categoryId.trim() === '') {
-            console.warn('Invalid categoryId provided:', categoryId);
-            return { name: 'Unknown Category', description: '' };
-        }
-        
-        const categoryDoc = await firestore.collection('categories').doc(categoryId).get();
-        if (categoryDoc.exists) {
-            const categoryData = categoryDoc.data();
-            return {
-                name: categoryData.name || 'Unknown Category',
-                description: categoryData.description || ''
-            };
-        }
-        return { name: 'Unknown Category', description: '' };
-    } catch (error) {
-        console.error('Error fetching category details:', error);
-        return { name: 'Unknown Category', description: '' };
-    }
-}
-
-async function getClientDetails(clientId) {
-    try {
-        const clientDoc = await firestore.collection('clients').doc(clientId).get();
-        if (clientDoc.exists) {
-            const clientData = clientDoc.data();
-            return {
-                name: clientData.fullname || 'Unknown Client',
-                email: clientData.email || '',
-                phone: clientData.contactNo || '',
-                address: clientData.address || '',
-            };
-        }
-        return { name: 'Unknown Client', email: '', phone: '', address: '' };
-    } catch (error) {
-        console.error('Error fetching client details:', error);
-        return { name: 'Unknown Client', email: '', phone: '', address: '' };
-    }
-}
-
-async function getBranchDetails(branchId) {
-    try {
-        const branchDoc = await firestore.collection('branches').doc(branchId).get();
-        if (branchDoc.exists) {
-            const branchData = branchDoc.data();
-            return {
-                name: branchData.name || 'Unknown Branch',
-                address: branchData.address || '',
-                phone: branchData.contactno || '',
-                email: branchData.email || '',
-                set_password: branchData.set_password || ''
-            };
-        }
-        return { name: 'Unknown Branch', address: '', phone: '', email: '' };
-    } catch (error) {
-        console.error('Error fetching branch details:', error);
-        return { name: 'Unknown Branch', address: '', phone: '', email: '' };
-    }
-}
-
-async function getServicesDetails(serviceIds) {
-    try {
-        if (!serviceIds || serviceIds.length === 0) {
-            return { services: [], totalCost: 0 };
-        }
-
-        const servicesQuery = await firestore.collection('services')
-            .where('id', 'in', serviceIds)
-            .get();
-
-        const services = [];
-        let totalCost = 0;
-
-        const servicePromises = servicesQuery.docs.map(async doc => {
-            const serviceData = doc.data();
-            const categoryDetails = serviceData.category ? await getCategoryDetails(serviceData.category) : { name: 'No Category', description: '' };
-            
-            totalCost += serviceData.price || 0;
-            
-            return {
-                name: serviceData.name || 'Unknown Service',
-                description: serviceData.description || '',
-                category: categoryDetails.name,
-                price: serviceData.price || 0
-            };
-        });
-
-        const resolvedServices = await Promise.all(servicePromises);
-        services.push(...resolvedServices);
-
-        return { services, totalCost };
-    } catch (error) {
-        console.error('Error fetching services details:', error);
-        return { services: [], totalCost: 0 };
-    }
-}
-
-// Helper function to get all master_admin emails
-async function getMasterAdminEmails() {
-    try {
-        const accountsSnapshot = await firestore.collection('accounts')
-            .where('role', '==', 'master_admin')
-            .where('status', '==', 'active')
-            .get();
-        
-        const emails = [];
-        accountsSnapshot.forEach(doc => {
-            const accountData = doc.data();
-            if (accountData.email) {
-                emails.push({
-                    email: accountData.email,
-                    accountId: doc.id,
-                    isCalendarShared: accountData.isCalendarShared || false
-                });
-            }
-        });
-        
-        console.log(`Found ${emails.length} master_admin emails:`, emails.map(e => `${e.email} (calendar shared: ${e.isCalendarShared})`));
-        return emails;
-    } catch (error) {
-        console.error('Error fetching master_admin emails:', error);
-        return [];
-    }
-}
-
-// Helper function to get emails for multiple roles with branch filtering
-async function getBranchAuthorizedEmails(branchId) {
-    try {
-        const emails = [];
-        
-        // Get master_admin emails (no branch filtering needed)
-        const masterAdminSnapshot = await firestore.collection('accounts')
-            .where('role', '==', 'master_admin')
-            .where('status', '==', 'active')
-            .where('isCalendarShared', '==', false)
-            .get();
-        
-        masterAdminSnapshot.forEach(doc => {
-            const accountData = doc.data();
-            if (accountData.email) {
-                emails.push({
-                    email: accountData.email,
-                    role: 'master_admin',
-                    branchId: accountData.branch_id || null,
-                    accountId: doc.id,
-                    isCalendarShared: accountData.isCalendarShared || false
-                });
-            }
-        });
-        
-        // Get super_admin emails (no branch filtering needed)
-        const superAdminSnapshot = await firestore.collection('accounts')
-            .where('role', '==', 'super_admin')
-            .where('status', '==', 'active')
-            .where('isCalendarShared', '==', false)
-            .get();
-        
-        superAdminSnapshot.forEach(doc => {
-            const accountData = doc.data();
-            if (accountData.email) {
-                emails.push({
-                    email: accountData.email,
-                    role: 'super_admin',
-                    branchId: accountData.branch_id || null,
-                    accountId: doc.id,
-                    isCalendarShared: accountData.isCalendarShared || false
-                });
-            }
-        });
-        
-        // Get branch-specific emails (branch, cashier roles)
-        const branchSpecificRoles = ['branch', 'cashier'];
-        
-        if (branchId) {
-            // If branchId is provided, only get users for that specific branch
-            for (const role of branchSpecificRoles) {
-                const roleSnapshot = await firestore.collection('accounts')
-                    .where('role', '==', role)
-                    .where('branch_id', '==', branchId)
-                    .where('status', '==', 'active')
-                    .where('isCalendarShared', '==', false)
-                    .get();
-                
-                roleSnapshot.forEach(doc => {
-                    const accountData = doc.data();
-                    if (accountData.email) {
-                        emails.push({
-                            email: accountData.email,
-                            role: role,
-                            branchId: accountData.branch_id,
-                            accountId: doc.id,
-                            isCalendarShared: accountData.isCalendarShared || false
-                        });
-                    }
-                });
-            }
-        } else {
-            // If branchId is null, get all branch and cashier users from all branches
-            for (const role of branchSpecificRoles) {
-                const roleSnapshot = await firestore.collection('accounts')
-                    .where('role', '==', role)
-                    .where('status', '==', 'active')
-                    .where('isCalendarShared', '==', false)
-                    .get();
-                
-                roleSnapshot.forEach(doc => {
-                    const accountData = doc.data();
-                    if (accountData.email) {
-                        emails.push({
-                            email: accountData.email,
-                            role: role,
-                            branchId: accountData.branch_id,
-                            accountId: doc.id,
-                            isCalendarShared: accountData.isCalendarShared || false
-                        });
-                    }
-                });
-            }
-        }
-        
-        // Remove duplicates by email (in case someone has multiple roles)
-        const uniqueEmails = [];
-        const emailSet = new Set();
-        
-        emails.forEach(emailObj => {
-            if (!emailSet.has(emailObj.email)) {
-                emailSet.add(emailObj.email);
-                uniqueEmails.push(emailObj);
-            }
-        });
-        
-        const branchDescription = branchId ? `branch ${branchId}` : 'all branches';
-        console.log(`Found ${uniqueEmails.length} authorized emails for ${branchDescription}:`);
-        uniqueEmails.forEach(emailObj => {
-            console.log(`- ${emailObj.email} (${emailObj.role}, branch: ${emailObj.branchId}, calendar shared: ${emailObj.isCalendarShared})`);
-        });
-        
-        return uniqueEmails;
-    } catch (error) {
-        console.error('Error fetching branch authorized emails:', error);
-        return [];
-    }
-}
-
-// Helper function to share calendar with master_admin users
-async function shareCalendarWithMasterAdmins(calendar, calendarId, branchName) {
-    try {
-        const masterAdminEmails = await getMasterAdminEmails();
-        
-        if (masterAdminEmails.length === 0) {
-            console.log('No master_admin users found to share calendar with');
-            return { shared: false, count: 0, emails: [] };
-        }
-        
-        const sharingPromises = masterAdminEmails.map(async (emailObj) => {
-            try {
-                // Share calendar with master_admin with 'owner' role (full access)
-                await calendarRateLimiter.shareCalendar(calendar, calendarId, {
-                    role: 'owner', // owner, reader, writer, freeBusyReader
-                    scope: {
-                        type: 'user',
-                        value: emailObj.email
-                    }
-                });
-                
-                // Update the master_admin account to mark calendar as shared
-                try {
-                    let accountDoc;
-                    if (emailObj.accountId) {
-                        accountDoc = await firestore.collection('accounts').doc(emailObj.accountId).get();
-                    } else {
-                        const accountQuery = await firestore.collection('accounts')
-                            .where('email', '==', emailObj.email)
-                            .limit(1)
-                            .get();
-                        
-                        if (!accountQuery.empty) {
-                            accountDoc = accountQuery.docs[0];
-                        }
-                    }
-                    
-                    if (accountDoc && accountDoc.exists) {
-                        await accountDoc.ref.update({
-                            calendar_shared: true,
-                            isCalendarShared: true, // Update the isCalendarShared field
-                            calendar_shared_at: moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss'),
-                            calendar_shared_calendar_id: calendarId,
-                            calendar_shared_branch: branchName
-                        });
-                        console.log(`Updated master_admin account for ${emailObj.email} - calendar marked as shared (both fields updated)`);
-                    } else {
-                        console.warn(`Master_admin account not found for ${emailObj.email} - cannot update calendar sharing status`);
-                    }
-                } catch (updateError) {
-                    console.error(`Failed to update master_admin account for ${emailObj.email}:`, updateError.message);
-                    // Don't fail the whole sharing process if account update fails
-                }
-                
-                console.log(`Successfully shared ${branchName} calendar with master_admin: ${emailObj.email}`);
-                return { email: emailObj.email, success: true };
-            } catch (shareError) {
-                console.error(`Failed to share ${branchName} calendar with ${emailObj.email}:`, shareError.message);
-                return { email: emailObj.email, success: false, error: shareError.message };
-            }
-        });
-        
-        const results = await Promise.all(sharingPromises);
-        const successfulShares = results.filter(r => r.success);
-        const failedShares = results.filter(r => !r.success);
-        
-        console.log(`Calendar sharing summary for ${branchName}:`);
-        console.log(`- Successfully shared with ${successfulShares.length} master_admin(s)`);
-        console.log(`- Failed to share with ${failedShares.length} master_admin(s)`);
-        
-        if (failedShares.length > 0) {
-            console.log('Failed shares:', failedShares.map(f => `${f.email}: ${f.error}`));
-        }
-        
-        return {
-            shared: successfulShares.length > 0,
-            count: successfulShares.length,
-            emails: successfulShares.map(s => s.email),
-            failed: failedShares,
-            total_attempts: masterAdminEmails.length
-        };
-    } catch (error) {
-        console.error(`Error sharing calendar for ${branchName}:`, error);
-        return { shared: false, count: 0, emails: [], error: error.message };
-    }
-}
-
-// Helper function to check existing calendar permissions using database tracking
-async function checkCalendarPermissions(calendar, calendarId, branchId = null) {
-    try {
-        // Get all authorized users that should have access
-        const authorizedUsers = await getBranchAuthorizedEmails(branchId);
-        
-        if (authorizedUsers.length === 0) {
-            console.log('No authorized users found - no sharing needed');
-            return {
-                needsSharing: false,
-                existingShares: 0,
-                existingEmails: [],
-                sharesByRole: {},
-                roleAccessLevels: {},
-                currentAcl: 0,
-                authorizedUsers: 0
-            };
-        }
-        
-        // Define expected access levels by role
-        const roleAccessLevels = {
-            'master_admin': 'owner',    // Full access
-            'super_admin': 'owner',     // Full access
-            'branch': 'writer',         // Can create/edit events
-            'cashier': 'reader'         // Read-only access
-        };
-        
-        // Check which users already have calendar access from database
-        const usersWithAccess = [];
-        const usersNeedingAccess = [];
-        const sharesByRole = {};
-        
-        // Initialize role counters
-        Object.keys(roleAccessLevels).forEach(role => {
-            sharesByRole[role] = { existing: 0, needed: 0, emails: [] };
-        });
-        
-        // Check each user's calendar sharing status
-        for (const userObj of authorizedUsers) {
-            try {
-                // Use the accountId from the userObj if available, otherwise query by email
-                let accountDoc;
-                if (userObj.accountId) {
-                    accountDoc = await firestore.collection('accounts').doc(userObj.accountId).get();
-                } else {
-                    accountDoc = await firestore.collection('accounts')
-                        .where('email', '==', userObj.email)
-                        .limit(1)
-                        .get();
-                    if (!accountDoc.empty) {
-                        accountDoc = accountDoc.docs[0];
-                    }
-                }
-                
-                if (accountDoc && accountDoc.exists) {
-                    const accountData = accountDoc.data();
-                    // Check both calendar_shared and isCalendarShared fields for compatibility
-                    const hasCalendarAccess = accountData.calendar_shared === true || accountData.isCalendarShared === true;
-                    
-                    if (hasCalendarAccess) {
-                        usersWithAccess.push({
-                            email: userObj.email,
-                            role: userObj.role,
-                            expectedAccess: roleAccessLevels[userObj.role] || 'reader'
-                        });
-                        
-                        if (sharesByRole[userObj.role]) {
-                            sharesByRole[userObj.role].existing++;
-                            sharesByRole[userObj.role].emails.push(userObj.email);
-                        }
-                    } else {
-                        usersNeedingAccess.push({
-                            email: userObj.email,
-                            role: userObj.role,
-                            expectedAccess: roleAccessLevels[userObj.role] || 'reader'
-                        });
-                        
-                        if (sharesByRole[userObj.role]) {
-                            sharesByRole[userObj.role].needed++;
-                        }
-                    }
-                } else {
-                    // Account not found, assume access needed
-                    usersNeedingAccess.push({
-                        email: userObj.email,
-                        role: userObj.role,
-                        expectedAccess: roleAccessLevels[userObj.role] || 'reader'
-                    });
-                    
-                    if (sharesByRole[userObj.role]) {
-                        sharesByRole[userObj.role].needed++;
-                    }
-                }
-            } catch (userError) {
-                console.error(`Error checking calendar access for ${userObj.email}:`, userError.message);
-                // Assume access needed if we can't check
-                usersNeedingAccess.push({
-                    email: userObj.email,
-                    role: userObj.role,
-                    expectedAccess: roleAccessLevels[userObj.role] || 'reader'
-                });
-                
-                if (sharesByRole[userObj.role]) {
-                    sharesByRole[userObj.role].needed++;
-                }
-            }
-        }
-        
-        const needsSharing = usersNeedingAccess.length > 0;
-        
-        console.log(`Calendar permissions check for calendar ${calendarId}:`);
-        console.log(`- Users with access: ${usersWithAccess.length}`);
-        console.log(`- Users needing access: ${usersNeedingAccess.length}`);
-        console.log(`- Total authorized users: ${authorizedUsers.length}`);
-        console.log(`- Needs sharing: ${needsSharing}`);
-        
-        Object.keys(sharesByRole).forEach(role => {
-            const roleData = sharesByRole[role];
-            if (roleData.existing > 0 || roleData.needed > 0) {
-                console.log(`- ${role}: ${roleData.existing} existing, ${roleData.needed} needed`);
-            }
-        });
-        
-        return {
-            needsSharing,
-            existingShares: usersWithAccess.length,
-            existingEmails: usersWithAccess.map(u => u.email),
-            sharesByRole,
-            roleAccessLevels,
-            currentAcl: 0, // Not using ACL anymore
-            authorizedUsers: authorizedUsers.length,
-            usersWithAccess,
-            usersNeedingAccess
-        };
-        
-    } catch (error) {
-        console.error('Error checking calendar permissions:', error);
-        // If we can't check permissions, assume sharing is needed
-        return {
-            needsSharing: true,
-            existingShares: 0,
-            existingEmails: [],
-            sharesByRole: {},
-            roleAccessLevels: {},
-            currentAcl: 0,
-            authorizedUsers: 0,
-            error: error.message
-        };
-    }
-}
-
-// Helper function to share branch calendar with only users who need access
-async function shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, branchName, branchId) {
-    try {
-        // First check existing permissions to see who already has access
-        const existingPermissions = await checkCalendarPermissions(calendar, calendarId);
-        
-        if (!existingPermissions.needsSharing) {
-            console.log(`Calendar ${calendarId} already has all necessary permissions - no sharing needed`);
-            return {
-                shared: true,
-                count: existingPermissions.existingShares,
-                emails: existingPermissions.existingEmails,
-                by_role: existingPermissions.sharesByRole,
-                successful_shares: [],
-                failed_shares: [],
-                total_attempts: 0,
-                access_levels: existingPermissions.roleAccessLevels,
-                sharing_skipped: true,
-                reason: 'All users already have access'
-            };
-        }
-        
-        // Get authorized users for this specific branch
-        const authorizedUsers = await getBranchAuthorizedEmails(branchId);
-        
-        if (authorizedUsers.length === 0) {
-            console.log(`No authorized users found to share ${branchName} calendar with`);
-            return { shared: false, count: 0, emails: [], by_role: {} };
-        }
-        
-        // Define access levels by role
-        const roleAccessLevels = {
-            'master_admin': 'owner',    // Full access
-            'super_admin': 'owner',     // Full access
-            'branch': 'writer',         // Can create/edit events
-            'cashier': 'reader'         // Read-only access
-        };
-        
-        // Filter out users who already have access
-        const usersNeedingAccess = authorizedUsers.filter(userObj => {
-            // Check if user already has calendar access from database
-            const hasAccess = existingPermissions.existingEmails.includes(userObj.email) || userObj.isCalendarShared === true;
-            if (hasAccess) {
-                console.log(`User ${userObj.email} (${userObj.role}) already has calendar access - skipping`);
-            }
-            return !hasAccess;
-        });
-        
-        if (usersNeedingAccess.length === 0) {
-            console.log(`All authorized users for ${branchName} already have calendar access`);
-            return {
-                shared: true,
-                count: existingPermissions.existingShares,
-                emails: existingPermissions.existingEmails,
-                by_role: existingPermissions.sharesByRole,
-                successful_shares: [],
-                failed_shares: [],
-                total_attempts: 0,
-                access_levels: roleAccessLevels,
-                sharing_skipped: true,
-                reason: 'All branch users already have access'
-            };
-        }
-        
-        console.log(`Sharing calendar with ${usersNeedingAccess.length} users who need access (${authorizedUsers.length - usersNeedingAccess.length} already have access)`);
-        
-        // Only share with users who need access
-        const sharingPromises = usersNeedingAccess.map(async (userObj) => {
-            try {
-                const accessLevel = roleAccessLevels[userObj.role] || 'reader';
-                
-                // Share calendar with appropriate access level
-                await calendarRateLimiter.shareCalendar(calendar, calendarId, {
-                    role: accessLevel,
-                    scope: {
-                        type: 'user',
-                        value: userObj.email
-                    }
-                });
-                
-                // Update the user's account to mark calendar as shared
-                try {
-                    // Use the accountId from userObj if available, otherwise query by email
-                    let accountDoc;
-                    if (userObj.accountId) {
-                        accountDoc = await firestore.collection('accounts').doc(userObj.accountId).get();
-                    } else {
-                        const accountQuery = await firestore.collection('accounts')
-                            .where('email', '==', userObj.email)
-                            .limit(1)
-                            .get();
-                        
-                        if (!accountQuery.empty) {
-                            accountDoc = accountQuery.docs[0];
-                        }
-                    }
-                    
-                    if (accountDoc && accountDoc.exists) {
-                        await accountDoc.ref.update({
-                            calendar_shared: true,
-                            isCalendarShared: true, // Update the isCalendarShared field
-                            calendar_shared_at: moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss'),
-                            calendar_shared_calendar_id: calendarId,
-                            calendar_shared_branch: branchName
-                        });
-                        console.log(`Updated account for ${userObj.email} - calendar marked as shared (both fields updated)`);
-                    } else {
-                        console.warn(`Account not found for ${userObj.email} - cannot update calendar sharing status`);
-                    }
-                } catch (updateError) {
-                    console.error(`Failed to update account for ${userObj.email}:`, updateError.message);
-                    // Don't fail the whole sharing process if account update fails
-                }
-                
-                console.log(`Successfully shared ${branchName} calendar with ${userObj.role}: ${userObj.email} (${accessLevel} access)`);
-                return { 
-                    email: userObj.email, 
-                    role: userObj.role,
-                    accessLevel: accessLevel,
-                    branchId: userObj.branchId,
-                    success: true,
-                    account_updated: true
-                };
-            } catch (shareError) {
-                console.error(`Failed to share ${branchName} calendar with ${userObj.role} ${userObj.email}:`, shareError.message);
-                return { 
-                    email: userObj.email, 
-                    role: userObj.role,
-                    accessLevel: roleAccessLevels[userObj.role] || 'reader',
-                    branchId: userObj.branchId,
-                    success: false, 
-                    error: shareError.message,
-                    account_updated: false
-                };
-            }
-        });
-        
-        const results = await Promise.all(sharingPromises);
-        const successfulShares = results.filter(r => r.success);
-        const failedShares = results.filter(r => !r.success);
-        
-        // Group results by role for detailed reporting
-        const sharesByRole = {};
-        results.forEach(result => {
-            if (!sharesByRole[result.role]) {
-                sharesByRole[result.role] = { successful: 0, failed: 0, emails: [] };
-            }
-            if (result.success) {
-                sharesByRole[result.role].successful++;
-                sharesByRole[result.role].emails.push(result.email);
-            } else {
-                sharesByRole[result.role].failed++;
-            }
-        });
-        
-        // Merge with existing shares for complete picture
-        Object.keys(existingPermissions.sharesByRole).forEach(role => {
-            if (!sharesByRole[role]) {
-                sharesByRole[role] = { successful: 0, failed: 0, emails: [] };
-            }
-            // Add existing shares
-            sharesByRole[role].existing = existingPermissions.sharesByRole[role].existing || 0;
-            sharesByRole[role].emails = [...new Set([
-                ...sharesByRole[role].emails,
-                ...(existingPermissions.sharesByRole[role].emails || [])
-            ])];
-        });
-        
-        console.log(`Branch calendar sharing summary for ${branchName} (Branch ID: ${branchId}):`);
-        console.log(`- Total authorized users: ${authorizedUsers.length}`);
-        console.log(`- Users already had access: ${existingPermissions.existingShares}`);
-        console.log(`- New shares attempted: ${usersNeedingAccess.length}`);
-        console.log(`- Successfully shared with: ${successfulShares.length} new users`);
-        console.log(`- Failed to share with: ${failedShares.length} users`);
-        
-        Object.keys(sharesByRole).forEach(role => {
-            const roleData = sharesByRole[role];
-            if (roleData.successful > 0 || roleData.failed > 0 || roleData.existing > 0) {
-                console.log(`- ${role}: ${roleData.existing} existing, ${roleData.successful} new successful, ${roleData.failed} failed`);
-            }
-        });
-        
-        if (failedShares.length > 0) {
-            console.log('Failed shares:', failedShares.map(f => `${f.email} (${f.role}): ${f.error}`));
-        }
-        
-        return {
-            shared: successfulShares.length > 0 || existingPermissions.existingShares > 0,
-            count: successfulShares.length + existingPermissions.existingShares,
-            emails: [...new Set([...successfulShares.map(s => s.email), ...existingPermissions.existingEmails])],
-            by_role: sharesByRole,
-            successful_shares: successfulShares,
-            failed_shares: failedShares,
-            total_attempts: usersNeedingAccess.length,
-            access_levels: roleAccessLevels,
-            sharing_skipped: false,
-            reason: 'Partial sharing performed',
-            existing_users: existingPermissions.existingShares,
-            new_shares: successfulShares.length
-        };
-    } catch (error) {
-        console.error(`Error sharing branch calendar for ${branchName}:`, error);
-        return { shared: false, count: 0, emails: [], error: error.message };
-    }
-}
-
-
-
-// CREATE - Create a new booking per branch with dedicated calendar
-router.post('/createBookingperBranch', async (req, res) => {
-    try {
-        let { client_id, branch_id, date, time, service_ids = [], status = 'scheduled', notes = '' } = req.body;
+        let { client_id, branch_id, date, time, service_ids = [], status = 'scheduled', notes = '' , slot = 1} = req.body;
         date = moment.tz(date, 'Asia/Manila').format('YYYY-MM-DD');
 
         // Validate required fields
@@ -949,13 +57,13 @@ router.post('/createBookingperBranch', async (req, res) => {
         const duplicateQuery = await firestore.collection(BOOKINGS_COLLECTION)
             .where('branch_id', '==', branch_id)
             .where('date', '==', date)
-            .where('time', '==', time)
+            .where('client_id', '==', client_id)
             .where('status', '==', 'scheduled')
             .get();
 
         if (!duplicateQuery.empty) {
             return res.status(409).json({ 
-                error: 'A booking with the same branch, date, and time already exists',
+                error: 'A booking with the same branch, date, and client already exists',
                 existing_booking_id: duplicateQuery.docs[0].id
             });
         }
@@ -970,6 +78,7 @@ router.post('/createBookingperBranch', async (req, res) => {
             branch_id,
             date,
             time,
+            slot,
             service_ids,
             status,
             notes,
@@ -1001,6 +110,7 @@ router.post('/createBookingperBranch', async (req, res) => {
                 email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
                 key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
                 scopes,
+                subject: process.env.GOOGLE_WORKSPACE_EMAIL 
             });
             
             const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
@@ -1162,6 +272,14 @@ Created: ${created_at}
                     dateTime: endDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
                     timeZone: 'Asia/Manila'
                 },
+                // how can I check if there is an existing attendee in the event?
+                attendees: [
+                    {
+                        email: clientDetails.email,
+                        displayName: clientDetails.name,
+                        responseStatus: 'needsAction'
+                    }
+                ],
                 location: branchDetails.address,
                 reminders: {
                     useDefault: false,
@@ -1170,7 +288,12 @@ Created: ${created_at}
                         { method: 'popup', minutes: 30 }       // 30 minutes before
                     ]
                 },
+                organizer: {
+                    email: process.env.GOOGLE_WORKSPACE_EMAIL,
+                    displayName: branchDetails.name
+                },
                 visibility: 'public',
+                sendUpdates:'all',
                 extendedProperties: {
                     private: {
                         bookingId: booking_id,
@@ -1213,7 +336,411 @@ Created: ${created_at}
                 let emailResult = null;
                 try {
                     console.log(`Sending confirmation email to client ${clientDetails.email} for booking ${booking_id}`);
-                    emailResult = await emailService.sendBookingConfirmation(
+                    emailResult = await emailService.sendBookingCreatedNotification(
+                        enhancedBookingData,
+                        clientDetails,
+                        branchDetails,
+                        servicesDetails
+                    );
+                    
+                    if (emailResult.success) {
+                        console.log(`Confirmation email sent successfully to ${clientDetails.email}`);
+                    } else {
+                        console.warn(`Failed to send confirmation email: ${emailResult.error}`);
+                    }
+                } catch (emailError) {
+                    console.error('Error sending confirmation email:', emailError);
+                    emailResult = {
+                        success: false,
+                        error: emailError.message,
+                        skipped: false
+                    };
+                }
+
+                res.status(201).json({ 
+                    message: 'Branch booking created successfully with dedicated calendar', 
+                    booking_id,
+                    booking: enhancedBookingData,
+                    calendar_event_id: calendarResponse?.data?.id || null,
+                    calendar_event_link: calendarResponse?.data?.htmlLink || null,
+                    calendar_details: {
+                        calendar_id: calendarId,
+                        calendar_name: branchCalendarName,
+                        calendar_created: calendarCreated,
+                        calendar_shared: calendarShared,
+                        sharing_performed: sharingDetails.sharing_performed || false,
+                        existing_permissions_used: sharingDetails.existing_permissions || false,
+                        sharing_skipped: sharingDetails.sharing_skipped || false,
+                        reason: sharingDetails.reason || 'Unknown',
+                        existing_users: sharingDetails.existing_users || 0,
+                        new_shares: sharingDetails.new_shares || 0,
+                        sharing_details: sharingDetails
+                    },
+                    email_sent: emailResult?.success || false,
+                    email_details: emailResult,
+                    estimated_total_cost: totalCost,
+                    background_color: getStatusBackgroundColor(status),
+                    client_details: clientDetails,
+                    branch_details: branchDetails,
+                    services_details: services
+                });
+
+            } else {
+                console.log('Branch booking not created in calendar API');
+                res.status(500).json({ error: 'Failed to create branch booking in calendar' });
+            }
+            
+        } catch (calendarError) {
+            console.error('Error creating branch calendar event:', {
+                error: calendarError.message,
+                status: calendarError.response?.status,
+                statusText: calendarError.response?.statusText,
+                details: calendarError.response?.data,
+                calendarId: calendarId,
+                branchName: branchDetails.name,
+                hasGoogleCredentials: !!(process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL)
+            });
+            
+            // Create booking without calendar integration
+            console.log('Creating branch booking without calendar integration due to calendar error');
+            await firestore.collection(BOOKINGS_COLLECTION).doc(booking_id).set(bookingData);
+            
+            res.status(201).json({ 
+                message: 'Branch booking created successfully (without calendar integration)', 
+                booking_id,
+                booking: {
+                    ...bookingData,
+                    background_color: getStatusBackgroundColor(status)
+                },
+                calendar_created: false,
+                calendar_error: calendarError.message,
+                calendar_details: {
+                    calendar_created: false,
+                    calendar_shared: false,
+                    sharing_performed: false,
+                    existing_permissions_used: false,
+                    error: calendarError.message
+                },
+                estimated_total_cost: totalCost,
+                background_color: getStatusBackgroundColor(status),
+                client_details: clientDetails,
+                branch_details: branchDetails,
+                services_details: services
+            });
+            return;
+        }
+
+    } catch (error) {
+        console.error('Error creating branch booking:', error);
+        res.status(500).json({ error: 'Failed to create branch booking' });
+    }
+});
+
+// CREATE - Create a new booking per branch with dedicated calendar
+router.post('/createBookingperBranch', async (req, res) => {
+    try {
+        let { client_id, branch_id, date, time, service_ids = [], status = 'scheduled', notes = '' , slot = 1} = req.body;
+        date = moment.tz(date, 'Asia/Manila').format('YYYY-MM-DD');
+
+        // Validate required fields
+        if (!client_id || !branch_id || !date || !time) {
+            return res.status(400).json({ 
+                error: 'Missing required fields: client_id, branch_id, date, time are required' 
+            });
+        }
+
+        // Get branch details first to ensure branch exists
+        const branchDetails = await getBranchDetails(branch_id);
+        if (!branchDetails.name || branchDetails.name === 'Unknown Branch') {
+            return res.status(404).json({ 
+                error: 'Branch not found or invalid branch_id provided' 
+            });
+        }
+
+        // Check for duplicate booking
+        const duplicateQuery = await firestore.collection(BOOKINGS_COLLECTION)
+            .where('branch_id', '==', branch_id)
+            .where('date', '==', date)
+            .where('client_id', '==', client_id)
+            .where('status', '==', 'scheduled')
+            .get();
+
+        if (!duplicateQuery.empty) {
+            return res.status(409).json({ 
+                error: 'A booking with the same branch, date, and client already exists',
+                existing_booking_id: duplicateQuery.docs[0].id
+            });
+        }
+
+        const booking_id = uuidv4();
+        const created_at = moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss');
+        const updated_at = moment.tz('Asia/Manila').format('YYYY-MM-DD HH:mm:ss');
+
+        const bookingData = {
+            booking_id,
+            client_id,
+            branch_id,
+            date,
+            time,
+            slot,
+            service_ids,
+            status,
+            notes,
+            created_at,
+            updated_at
+        };
+
+        // Fetch related data for rich calendar event
+        const [clientDetails, servicesDetails] = await Promise.all([
+            getClientDetails(client_id),
+            getServicesDetails(service_ids)
+        ]);
+
+        const { services, totalCost } = servicesDetails;
+
+        // Setup Google Calendar integration with enhanced branch-specific logic
+        let calendarResponse = null;
+        let calendarId = null;
+        let calendarCreated = false;
+        
+        const scopes = [
+            'https://www.googleapis.com/auth/calendar',
+            'https://www.googleapis.com/auth/calendar.events'
+        ];
+        
+        try {
+            // Use Google service account credentials for calendar API
+            const oauth2Client = new google.auth.JWT({
+                email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
+                key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
+                scopes,
+                subject: process.env.GOOGLE_WORKSPACE_EMAIL 
+            });
+            
+            const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+            
+            // Enhanced calendar setup with proper naming convention
+            const branchCalendarName = `${branchDetails.name} Bookings`;
+            console.log(`Setting up calendar for branch: ${branchDetails.name}`);
+            console.log(`Expected calendar name: ${branchCalendarName}`);
+            
+            // Check if calendar already exists for this branch
+            const calendarList = await calendarRateLimiter.listCalendars(calendar);
+            let existingCalendar = calendarList.data.items?.find(cal => 
+                cal.summary === branchCalendarName ||
+                cal.summary === `${branchDetails.name} - Bookings Calendar`
+            );
+            
+            if (existingCalendar) {
+                calendarId = existingCalendar.id;
+                console.log(`Using existing calendar for ${branchDetails.name}:`, calendarId);
+            } else {
+                // Create new calendar for this branch
+                console.log(`Creating new calendar for branch: ${branchDetails.name}`);
+                const newCalendar = await calendarRateLimiter.createCalendar(calendar, {
+                    summary: branchCalendarName,
+                    description: `Dedicated booking calendar for ${branchDetails.name} branch. All appointments and bookings for this location are managed here.`,
+                    timeZone: 'Asia/Manila'
+                });
+                
+                calendarId = newCalendar.data.id;
+                calendarCreated = true;
+                console.log(`Successfully created new calendar for ${branchDetails.name}:`, calendarId);
+            }
+            
+            // Check if calendar is already shared with authorized users before attempting to share
+            console.log(`Checking existing calendar permissions for ${branchDetails.name} (Branch ID: ${branch_id})`);
+            const existingPermissions = await checkCalendarPermissions(calendar, calendarId, branch_id);
+            
+            let sharingResult = null;
+            let calendarShared = false;
+            let sharingDetails = {};
+            
+            if (existingPermissions.needsSharing) {
+                console.log(`Calendar needs sharing - sharing with users who need access for ${branchDetails.name} (Branch ID: ${branch_id})`);
+                sharingResult = await shareCalendarWithBranchAuthorizedUsers(calendar, calendarId, branchDetails.name, branch_id);
+                
+                calendarShared = sharingResult.shared;
+                sharingDetails = {
+                    successful_shares: sharingResult.count,
+                    shared_emails: sharingResult.emails,
+                    failed_shares: sharingResult.failed_shares || [],
+                    total_attempts: sharingResult.total_attempts || 0,
+                    by_role: sharingResult.by_role || {},
+                    access_levels: sharingResult.access_levels || {},
+                    sharing_performed: !sharingResult.sharing_skipped,
+                    existing_permissions: false,
+                    sharing_skipped: sharingResult.sharing_skipped || false,
+                    reason: sharingResult.reason || 'Sharing performed',
+                    existing_users: sharingResult.existing_users || 0,
+                    new_shares: sharingResult.new_shares || 0
+                };
+            } else {
+                console.log(`Calendar already has proper permissions for ${branchDetails.name} - no sharing needed`);
+                calendarShared = true;
+                sharingDetails = {
+                    successful_shares: existingPermissions.existingShares,
+                    shared_emails: existingPermissions.existingEmails,
+                    failed_shares: [],
+                    total_attempts: 0,
+                    by_role: existingPermissions.sharesByRole || {},
+                    access_levels: existingPermissions.roleAccessLevels || {},
+                    sharing_performed: false,
+                    existing_permissions: true,
+                    sharing_skipped: true,
+                    reason: 'All users already have access',
+                    existing_users: existingPermissions.existingShares,
+                    new_shares: 0
+                };
+            }
+            
+            console.log(`Calendar sharing result for ${branchDetails.name}:`, sharingDetails);
+
+            // Create enhanced calendar event
+            console.log('Input date:', date, 'Input time:', time);
+            
+            // Create moment object in Manila timezone with explicit format parsing
+            const dateTimeString = `${date} ${time}`;
+            console.log('Combined datetime string:', dateTimeString);
+            
+            // Try multiple formats to parse the input correctly
+            let startDateTime;
+            
+            // Try HH:mm:ss format first
+            startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm:ss', 'Asia/Manila');
+            
+            // If that fails, try HH:mm format
+            if (!startDateTime.isValid()) {
+                startDateTime = moment.tz(dateTimeString, 'YYYY-MM-DD HH:mm', 'Asia/Manila');
+            }
+            
+            // If still not valid, try fallback with T separator
+            if (!startDateTime.isValid()) {
+                startDateTime = moment.tz(`${date}T${time}`, 'Asia/Manila');
+            }
+            
+            // If all parsing attempts fail, throw an error
+            if (!startDateTime.isValid()) {
+                throw new Error(`Unable to parse date and time: ${date} ${time}`);
+            }
+
+            const endDateTime = startDateTime.clone().add(60, 'minutes'); // Default 1-hour duration
+            
+            console.log('Parsed start datetime:', startDateTime.format());
+            console.log('Parsed end datetime:', endDateTime.format());
+
+            // Create detailed event description
+            const servicesList = services.length > 0 
+                ? services.map(s => `• ${s.name} (${s.category}) - ₱${s.price.toFixed(2)}`).join('\n')
+                : '• No specific services selected';
+
+            const eventDescription = `
+📅 BRANCH BOOKING DETAILS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+👤 CLIENT INFORMATION
+Name: ${clientDetails.name}
+Email: ${clientDetails.email}
+Phone: ${clientDetails.phone}
+${clientDetails.address ? `Address: ${clientDetails.address}` : ''}
+
+🏢 BRANCH INFORMATION  
+Branch: ${branchDetails.name}
+Location: ${branchDetails.address}
+Contact: ${branchDetails.phone}
+${branchDetails.email ? `Email: ${branchDetails.email}` : ''}
+
+💼 SERVICES BOOKED
+${servicesList}
+
+💰 BOOKING SUMMARY
+Total Cost: ₱${totalCost.toFixed(2)}
+Status: ${status.toUpperCase()}
+Booking ID: ${booking_id}
+
+${notes ? `📝 NOTES\n${notes}` : ''}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Branch Calendar: ${branchCalendarName}
+Created: ${created_at}
+            `.trim();
+
+            const baseEvent = {
+                summary: `${clientDetails.name} - ${branchDetails.name}${services.length > 0 ? ` (${services.map(s => s.name).join(', ')})` : ''}`,
+                description: eventDescription,
+                start: { 
+                    dateTime: startDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                    timeZone: 'Asia/Manila'
+                },
+                end: { 
+                    dateTime: endDateTime.format('YYYY-MM-DDTHH:mm:ss+08:00'),
+                    timeZone: 'Asia/Manila'
+                },
+                // how can I check if there is an existing attendee in the event?
+                attendees: [
+                    {
+                        email: clientDetails.email,
+                        displayName: clientDetails.name,
+                        responseStatus: 'needsAction'
+                    }
+                ],
+                location: branchDetails.address,
+                reminders: {
+                    useDefault: false,
+                    overrides: [
+                        { method: 'email', minutes: 24 * 60 }, // 24 hours before
+                        { method: 'popup', minutes: 30 }       // 30 minutes before
+                    ]
+                },
+                organizer: {
+                    email: process.env.GOOGLE_WORKSPACE_EMAIL,
+                    displayName: branchDetails.name
+                },
+                visibility: 'public',
+                sendUpdates:'all',
+                extendedProperties: {
+                    private: {
+                        bookingId: booking_id,
+                        clientId: client_id,
+                        branchId: branch_id,
+                        branchName: branchDetails.name,
+                        totalCost: totalCost.toString(),
+                        serviceIds: JSON.stringify(service_ids),
+                        bookingStatus: status,
+                        calendarType: 'branch_specific'
+                    }
+                }
+            };
+
+            // Apply enhanced calendar event with color coding
+            const event = getEnhancedCalendarEvent(baseEvent, status);
+
+            console.log(`Creating calendar event in branch calendar: ${branchCalendarName} (${calendarId})`);
+            calendarResponse = await calendarRateLimiter.createEvent(calendar, calendarId, event);
+            
+            if (calendarResponse.status === 200) {
+                console.log('Enhanced branch booking created in calendar API successfully');
+                console.log('Calendar event ID:', calendarResponse.data.id);
+                console.log('Calendar event link:', calendarResponse.data.htmlLink);
+                
+                // Add calendar details to booking data
+                const enhancedBookingData = {
+                    ...bookingData,
+                    calendar_event_id: calendarResponse?.data?.id || null,
+                    calendar_event_link: calendarResponse?.data?.htmlLink || null,
+                    calendar_id: calendarId,
+                    calendar_name: branchCalendarName,
+                    estimated_total_cost: totalCost,
+                };
+
+                // Save to firestore 
+                await firestore.collection(BOOKINGS_COLLECTION).doc(booking_id).set(enhancedBookingData);
+
+                // Send confirmation email to client
+                let emailResult = null;
+                try {
+                    console.log(`Sending confirmation email to client ${clientDetails.email} for booking ${booking_id}`);
+                    emailResult = await emailService.sendBookingCreatedNotification(
                         enhancedBookingData,
                         clientDetails,
                         branchDetails,
@@ -1462,7 +989,7 @@ router.get('/getBooking/:booking_id', async (req, res) => {
 router.put('/updateBooking/:booking_id', async (req, res) => {
     try {
         const { booking_id } = req.params;
-        const { client_id, branch_id, date, time, service_ids, status, notes } = req.body;
+        const { client_id, branch_id, date, time, service_ids, status, notes ,slot} = req.body;
 
         // Check if booking exists
         const bookingRef = firestore.collection(BOOKINGS_COLLECTION).doc(booking_id);
@@ -1487,6 +1014,7 @@ router.put('/updateBooking/:booking_id', async (req, res) => {
         if (service_ids !== undefined) updateData.service_ids = service_ids;
         if (status !== undefined) updateData.status = status;
         if (notes !== undefined) updateData.notes = notes;
+        if (slot !== undefined) updateData.slot = slot;
 
         // Check for duplicate booking conflicts before updating
         // Only check if date, time, branch_id, or status is being updated
@@ -1495,13 +1023,14 @@ router.put('/updateBooking/:booking_id', async (req, res) => {
             const checkTime = time !== undefined ? time : currentBookingData.time;
             const checkBranchId = branch_id !== undefined ? branch_id : currentBookingData.branch_id;
             const checkStatus = status !== undefined ? status : currentBookingData.status;
-            
+            const checkSlot = slot !== undefined ? slot : currentBookingData.slot;
             // Only check for conflicts if the status is 'scheduled' (active booking)
             if (checkStatus === 'scheduled') {
                 const duplicateQuery = await firestore.collection(BOOKINGS_COLLECTION)
                     .where('branch_id', '==', checkBranchId)
                     .where('date', '==', checkDate)
                     .where('time', '==', checkTime)
+                    .where('slot', '==', checkSlot)
                     .where('status', '==', 'scheduled')
                     .get();
 
@@ -1511,7 +1040,7 @@ router.put('/updateBooking/:booking_id', async (req, res) => {
                 if (conflictingBookings.length > 0) {
                     const conflictingBooking = conflictingBookings[0].data();
                     return res.status(409).json({ 
-                        error: 'A booking with the same branch, date, time, and scheduled status already exists',
+                        error: 'A booking with the same branch, date, time, slot and scheduled status already exists',
                         existing_booking_id: conflictingBookings[0].id,
                         conflicting_details: {
                             branch_id: checkBranchId,
@@ -1704,7 +1233,7 @@ Updated: ${updateData.updated_at}
                     getBranchDetails(updatedBookingData.branch_id)
                 ]);
 
-                emailResult = await emailService.sendBookingUpdate(
+                emailResult = await emailService.sendBookingUpdatedNotification(
                     updatedBookingData,
                     updatedClientDetails,
                     updatedBranchDetails,
@@ -2528,16 +2057,16 @@ router.get('/test-email-service', async (req, res) => {
         }
 
         // Test email connection
-        const connectionTest = await emailService.testConnection();
+        const connectionTest = await emailService.initialize();
         
-        if (!connectionTest.success) {
+        if (!connectionTest) {
             return res.status(500).json({
                 error: 'Email service connection failed',
-                connection_test: connectionTest,
+                connection_test: { success: false, error: 'Gmail API initialization failed' },
                 suggestions: [
-                    'Check EMAIL_HOST, EMAIL_USER, and EMAIL_PASS environment variables',
-                    'Verify email server credentials and settings',
-                    'Ensure email server is accessible from your network'
+                    'Check GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY environment variables',
+                    'Verify Google service account credentials are correct',
+                    'Ensure Gmail API is enabled in Google Cloud Console'
                 ]
             });
         }
@@ -2575,7 +2104,7 @@ router.get('/test-email-service', async (req, res) => {
         };
 
         // Test sending confirmation email
-        const emailResult = await emailService.sendBookingConfirmation(
+        const emailResult = await emailService.sendBookingCreatedNotification(
             testBookingData,
             testClientDetails,
             testBranchDetails,
@@ -2593,11 +2122,9 @@ router.get('/test-email-service', async (req, res) => {
             },
             email_result: emailResult,
             environment_check: {
-                has_email_host: !!process.env.EMAIL_HOST,
-                has_email_user: !!process.env.EMAIL_USER,
-                has_email_pass: !!process.env.EMAIL_PASS,
-                has_email_port: !!process.env.EMAIL_PORT,
-                has_email_secure: !!process.env.EMAIL_SECURE,
+                has_google_client_email: !!process.env.GOOGLE_CLIENT_EMAIL,
+                has_google_private_key: !!process.env.GOOGLE_PRIVATE_KEY,
+                has_google_workspace_email: !!process.env.GOOGLE_WORKSPACE_EMAIL,
                 has_frontend_url: !!process.env.FRONTEND_URL
             }
         });
@@ -2607,11 +2134,11 @@ router.get('/test-email-service', async (req, res) => {
         res.status(500).json({
             error: 'Email service test failed',
             details: error.message,
-            suggestions: [
-                'Check email service configuration',
-                'Verify environment variables are set correctly',
-                'Ensure email server is accessible'
-            ]
+                            suggestions: [
+                    'Check Gmail API configuration',
+                    'Verify Google service account credentials are set correctly',
+                    'Ensure Gmail API is enabled in Google Cloud Console'
+                ]
         });
     }
 });
@@ -2628,16 +2155,16 @@ router.get('/test-calendar-email', async (req, res) => {
         }
 
         // Test email connection
-        const connectionTest = await emailService.testConnection();
+        const connectionTest = await emailService.initialize();
         
-        if (!connectionTest.success) {
+        if (!connectionTest) {
             return res.status(500).json({
                 error: 'Email service connection failed',
-                connection_test: connectionTest,
+                connection_test: { success: false, error: 'Gmail API initialization failed' },
                 suggestions: [
-                    'Check EMAIL_HOST, EMAIL_USER, and EMAIL_PASS environment variables',
-                    'Verify email server credentials and settings',
-                    'Ensure email server is accessible from your network'
+                    'Check GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY environment variables',
+                    'Verify Google service account credentials are correct',
+                    'Ensure Gmail API is enabled in Google Cloud Console'
                 ]
             });
         }
@@ -2679,7 +2206,7 @@ router.get('/test-calendar-email', async (req, res) => {
         };
 
         // Test sending confirmation email with calendar event
-        const emailResult = await emailService.sendBookingConfirmation(
+        const emailResult = await emailService.sendBookingCreatedNotification(
             testBookingData,
             testClientDetails,
             testBranchDetails,
@@ -2687,7 +2214,7 @@ router.get('/test-calendar-email', async (req, res) => {
         );
 
         // Test sending update email with calendar event
-        const updateEmailResult = await emailService.sendBookingUpdate(
+        const updateEmailResult = await emailService.sendBookingUpdatedNotification(
             testBookingData,
             testClientDetails,
             testBranchDetails,
@@ -2718,11 +2245,9 @@ router.get('/test-calendar-email', async (req, res) => {
                 decline_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/booking/decline/${testBookingData.booking_id}?calendar_event_id=${testBookingData.calendar_event_id}`
             },
             environment_check: {
-                has_email_host: !!process.env.EMAIL_HOST,
-                has_email_user: !!process.env.EMAIL_USER,
-                has_email_pass: !!process.env.EMAIL_PASS,
-                has_email_port: !!process.env.EMAIL_PORT,
-                has_email_secure: !!process.env.EMAIL_SECURE,
+                has_google_client_email: !!process.env.GOOGLE_CLIENT_EMAIL,
+                has_google_private_key: !!process.env.GOOGLE_PRIVATE_KEY,
+                has_google_workspace_email: !!process.env.GOOGLE_WORKSPACE_EMAIL,
                 has_frontend_url: !!process.env.FRONTEND_URL
             }
         });
@@ -2733,9 +2258,9 @@ router.get('/test-calendar-email', async (req, res) => {
             error: 'Calendar event email test failed',
             details: error.message,
             suggestions: [
-                'Check email service configuration',
-                'Verify environment variables are set correctly',
-                'Ensure email server is accessible',
+                'Check Gmail API configuration',
+                'Verify Google service account credentials are set correctly',
+                'Ensure Gmail API is enabled in Google Cloud Console',
                 'Check that calendar event data is properly formatted'
             ]
         });
@@ -2978,37 +2503,39 @@ Previous Status: ${previousStatus.toUpperCase()}
 
             // Send appropriate email based on status
             if (status === 'scheduled') {
-                emailResult = await emailService.sendBookingConfirmation(
+                emailResult = await emailService.sendBookingCreatedNotification(
                     emailBookingData,
                     updatedClientDetails,
                     updatedBranchDetails,
                     updatedServicesDetails
                 );
             } else if (status === 'cancelled') {
-                emailResult = await emailService.sendBookingCancellation(
-                    emailBookingData,
-                    updatedClientDetails,
-                    updatedBranchDetails,
-                    updatedServicesDetails
-                );
-            } else if (status === 'completed') {
-                emailResult = await emailService.sendBookingCompletion(
-                    emailBookingData,
-                    updatedClientDetails,
-                    updatedBranchDetails,
-                    updatedServicesDetails
-                );
-            } else if (status === 'rescheduled') {
-                emailResult = await emailService.sendBookingEmail(
+                emailResult = await emailService.sendBookingStatusChangedNotification(
                     emailBookingData,
                     updatedClientDetails,
                     updatedBranchDetails,
                     updatedServicesDetails,
-                    'rescheduled'
+                    previousStatus
+                );
+            } else if (status === 'completed') {
+                emailResult = await emailService.sendBookingStatusChangedNotification(
+                    emailBookingData,
+                    updatedClientDetails,
+                    updatedBranchDetails,
+                    updatedServicesDetails,
+                    previousStatus
+                );
+            } else if (status === 'rescheduled') {
+                emailResult = await emailService.sendBookingStatusChangedNotification(
+                    emailBookingData,
+                    updatedClientDetails,
+                    updatedBranchDetails,
+                    updatedServicesDetails,
+                    previousStatus
                 );
             } else {
                 // For other statuses, send a general update email
-                emailResult = await emailService.sendBookingUpdate(
+                emailResult = await emailService.sendBookingUpdatedNotification(
                     emailBookingData,
                     updatedClientDetails,
                     updatedBranchDetails,
@@ -3059,5 +2586,4 @@ Previous Status: ${previousStatus.toUpperCase()}
         res.status(500).json({ error: 'Failed to update booking status' });
     }
 });
-
 

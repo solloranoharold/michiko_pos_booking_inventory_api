@@ -5,7 +5,12 @@ async function requireAuthHeader(req, res, next) {
   // Note: When using app.use('/api', middleware), req.path doesn't include /api prefix
   if (
     req.path.startsWith('/clients/registerClientPublic') ||
-    req.originalUrl.startsWith('/api/clients/registerClientPublic')
+    req.originalUrl.startsWith('/api/clients/registerClientPublic') || 
+    req.originalUrl.startsWith('/api/clients/getEmailClient') ||
+    req.originalUrl.startsWith('/api/branches/getBranchesforClient') ||
+    req.originalUrl.startsWith('/api/services/getServicesforClient') ||
+    req.originalUrl.startsWith('/api/time-slots/getAvailableTimeSlotsClients') ||
+    req.originalUrl.startsWith('/api/bookings/createBookingperBranchClient')
   ) {
     return next();
   }

@@ -2,6 +2,7 @@ const admin = require('../firebaseAdmin');
 const { v4: uuidv4 } = require('uuid');
 const express = require('express');
 const moment = require('moment');
+const { createBranchCalendar, updateBranchCalendar, deleteBranchCalendar } = require('../services/branch-calendar-service');
 
 const router = express.Router();
 const firestore = admin.firestore();
@@ -106,9 +107,22 @@ router.post('/insertBranch', async (req, res) => {
     // Wait for all categories and payment methods to be created
     await Promise.all([...categoryPromises, ...paymentMethodPromises]);
     
+    // Create calendar for the new branch
+    try {
+      const calendarResult = await createBranchCalendar(name, id);
+      if (calendarResult.success) {
+        console.log(`Calendar setup for branch ${name}: ${calendarResult.message}`);
+      } else {
+        console.warn(`Calendar setup warning for branch ${name}: ${calendarResult.message}`);
+      }
+    } catch (calendarError) {
+      console.error(`Calendar setup error for branch ${name}:`, calendarError);
+      // Don't fail the branch creation if calendar setup fails
+    }
+    
     return res.status(200).json({
       data: branchData,
-      message: 'Branch created successfully with default categories and payment methods'
+      message: 'Branch created successfully with default categories, payment methods, and calendar setup'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -228,6 +242,22 @@ router.put('/updateBranch/:id', async (req, res) => {
     updateData.date_updated = now();
     updateData.doc_type = 'BRANCH';
     await branchRef.update(updateData);
+    
+    // Update calendar if branch name changed
+    if (name !== undefined && name !== prevData.name) {
+      try {
+        const calendarResult = await updateBranchCalendar(req.params.id, prevData.name, name);
+        if (calendarResult.success) {
+          console.log(`Calendar updated for branch ${name}: ${calendarResult.message}`);
+        } else {
+          console.warn(`Calendar update warning for branch ${name}: ${calendarResult.message}`);
+        }
+      } catch (calendarError) {
+        console.error(`Calendar update error for branch ${name}:`, calendarError);
+        // Don't fail the branch update if calendar update fails
+      }
+    }
+    
     res.json({ ...prevData, ...updateData });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -242,8 +272,26 @@ router.delete('/deleteBranch/:id', async (req, res) => {
     if (!branchSnap.exists) {
       return res.status(404).json({ error: 'Branch not found' });
     }
+    
+    const branchData = branchSnap.data();
+    
+    // Delete the branch first
     await branchRef.delete();
-    res.json({ message: 'Branch deleted' });
+    
+    // Delete calendar for the branch
+    try {
+      const calendarResult = await deleteBranchCalendar(req.params.id, branchData.name);
+      if (calendarResult.success) {
+        console.log(`Calendar deleted for branch ${branchData.name}: ${calendarResult.message}`);
+      } else {
+        console.warn(`Calendar deletion warning for branch ${branchData.name}: ${calendarResult.message}`);
+      }
+    } catch (calendarError) {
+      console.error(`Calendar deletion error for branch ${branchData.name}:`, calendarError);
+      // Don't fail the branch deletion if calendar deletion fails
+    }
+    
+    res.json({ message: 'Branch and associated calendar deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -261,6 +309,17 @@ router.get('/getBranchAll', async (req, res) => {
     const branches = snapshot.docs.map(doc => doc.data());
     
     return res.status(200).json({ data: branches });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+})
+
+
+router.get('/getBranchesforClient' ,async (req, res) => {
+  try {
+    const branches = await firestore.collection(BRANCHES_COLLECTION).where('subscription_status', '==', 'active').get();
+    const branchesData = branches.docs.map(doc => doc.data());
+    return res.status(200).json({ data: branchesData });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

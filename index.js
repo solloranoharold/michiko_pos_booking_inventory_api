@@ -18,6 +18,7 @@ const discountRouter = require('./routers/discount');
 const paymentMethodsRouter = require('./routers/paymentMethods');
 const bookingRouter = require('./routers/booking');
 const timeSlotRouter = require('./routers/timeSlot');
+const branchServiceSettingsRouter = require('./routers/branchServiceSettings');
 const requireAuthHeader = require('./authMiddleware');
 const verifyToken = require('./verifyToken');
 
@@ -105,6 +106,7 @@ app.use('/api/discounts', discountRouter);
 app.use('/api/payment-methods', paymentMethodsRouter);
 app.use('/api/bookings', bookingRouter);
 app.use('/api/time-slots', timeSlotRouter);
+app.use('/api/branch-service-settings', branchServiceSettingsRouter);
 
 // Vercel-compatible server setup
 const PORT = process.env.PORT || 3000;

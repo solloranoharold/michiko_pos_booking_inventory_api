@@ -785,6 +785,64 @@ router.get('/downloadCSVTemplate', async (req, res) => {
   }
 });
 
+// for clients 
+router.get('/getServicesforClient/:branch_id', async (req, res) => {
+  try {
+    const { branch_id } = req.params;
+    
+    // First, get the branch service settings to get the service IDs
+    const branchServiceSettings = await admin.firestore()
+      .collection('branch_service_settings')
+      .where('branch_id', '==', branch_id)
+      .get();
+    
+    if (branchServiceSettings.empty) {
+      return res.status(200).json({ data: [] });
+    }
+    // Extract service IDs from the settings
+    const serviceIds = [];
+    branchServiceSettings.forEach(doc => {
+      const data = doc.data();
+      if (data.service_ids && Array.isArray(data.service_ids)) {
+        serviceIds.push(...data.service_ids);
+      }
+    });
+    // Remove duplicates
+    const uniqueServiceIds = [...new Set(serviceIds)];
+    
+    if (uniqueServiceIds.length === 0) {
+      return res.status(200).json({ data: [] });
+    }
+    // Fetch all service details from the services collection
+    const servicesSnapshot = await admin.firestore()
+      .collection('services')
+      .where('branch_id', '==', branch_id)
+      .where('id', 'in', uniqueServiceIds)
+      .get();
+    
+    const services = [];
+    servicesSnapshot.forEach(doc => {
+      const serviceData = doc.data();
+      console.log(serviceData , 'serviceData')
+      services.push({
+        id: serviceData.id,
+        name: serviceData.name,
+        description: serviceData.description,
+        category: serviceData.category,
+        price: serviceData.price,
+        status: serviceData.status,
+        branch_id: serviceData.branch_id,
+        date_created: serviceData.date_created
+      });
+    });
+    
+    res.status(200).json({ data: services });
+  } catch (error) {
+    console.error('Error fetching services for client:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Upload Excel/CSV file to insert services
 router.post('/uploadServices', upload, async (req, res) => {
   try {

@@ -1,9 +1,0 @@
-name,category,unit,quantity,unit_value,min_quantity,price,brand,status
-Sample Product,Hair Care,pcs,100,15.50,10,18.00,Sample Brand,active
-Hair Shampoo,Hair Care,bottle,50,12.75,5,15.00,Professional Brand,active
-Conditioner,Hair Care,bottle,45,14.25,5,17.50,Professional Brand,active
-Hair Gel,Styling & Make Up,tube,80,8.50,8,10.00,Styling Brand,active
-Nail Polish,Hand & Foot Care,bottle,120,6.25,12,8.00,Beauty Brand,active
-Face Cream,Skin Care,jar,60,18.00,6,22.00,Skincare Brand,active
-Massage Oil,Add Ons,bottle,30,25.50,3,30.00,Wellness Brand,active
-Hair Brush,Add Ons,piece,25,12.00,3,15.00,Professional Brand,active 

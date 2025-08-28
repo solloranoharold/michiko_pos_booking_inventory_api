@@ -1,104 +1,133 @@
 require("dotenv").config();
-const emailService = require('./emailService.js');
+const { emailService } = require('./services/email-service.js');
 
 async function testEmailService() {
     console.log('🧪 Testing Email Service...\n');
 
-    // Test 1: Check environment variables
-    console.log('📋 Environment Variables Check:');
-    console.log(`EMAIL_HOST: ${process.env.EMAIL_HOST ? '✅ Set' : '❌ Missing'}`);
-    console.log(`EMAIL_USER: ${process.env.EMAIL_USER ? '✅ Set' : '❌ Missing'}`);
-    console.log(`EMAIL_PASS: ${process.env.EMAIL_PASS ? '✅ Set' : '❌ Missing'}`);
-    console.log(`EMAIL_PORT: ${process.env.EMAIL_PORT || '587 (default)'}`);
-    console.log(`EMAIL_SECURE: ${process.env.EMAIL_SECURE || 'false (default)'}`);
-    console.log(`FRONTEND_URL: ${process.env.FRONTEND_URL ? '✅ Set' : '❌ Missing'}\n`);
-
-    // Test 2: Test connection
-    console.log('🔌 Testing Email Connection:');
     try {
-        const connectionTest = await emailService.testConnection();
-        if (connectionTest.success) {
-            console.log('✅ Email connection successful:', connectionTest.message);
-        } else {
-            console.log('❌ Email connection failed:', connectionTest.error);
-            console.log('💡 Please check your email credentials and server settings\n');
+        // Test 1: Initialize email service
+        console.log('1️⃣ Testing email service initialization...');
+        const initialized = await emailService.initialize();
+        console.log(`   ✅ Initialization: ${initialized ? 'SUCCESS' : 'FAILED'}\n`);
+
+        if (!initialized) {
+            console.log('❌ Email service failed to initialize. Check your credentials and Gmail API setup.');
             return;
         }
-    } catch (error) {
-        console.log('❌ Connection test error:', error.message);
-        return;
-    }
 
-    // Test 3: Test email sending (if test email is provided)
-    const testEmail = process.env.TEST_EMAIL;
-    if (testEmail) {
-        console.log(`📧 Testing Email Sending to: ${testEmail}`);
+        // Test 2: Get accounts by role and branch
+        console.log('2️⃣ Testing account discovery...');
+        const accounts = await emailService.getAccountsByRoleAndBranch();
+        console.log(`   ✅ Found ${accounts.length} total accounts`);
         
-        const testBookingData = {
-            booking_id: 'test-booking-123',
-            date: '2024-12-25',
+        // Group accounts by role
+        const accountsByRole = accounts.reduce((acc, account) => {
+            if (!acc[account.role]) acc[account.role] = 0;
+            acc[acc.role]++;
+            return acc;
+        }, {});
+        
+        Object.keys(accountsByRole).forEach(role => {
+            console.log(`   📧 ${role}: ${accountsByRole[role]} accounts`);
+        });
+        console.log('');
+
+        // Test 3: Test email content creation
+        console.log('3️⃣ Testing email content creation...');
+        const testData = {
+            booking_id: 'TEST-' + Date.now(),
+            date: '2024-01-15',
             time: '14:00:00',
             status: 'scheduled',
-            notes: 'This is a test booking for email service verification.',
-            estimated_total_cost: 1500.00
-        };
-
-        const testClientDetails = {
-            name: 'Test Client',
-            email: testEmail,
-            phone: '+63 912 345 6789',
-            address: '123 Test Street, Test City'
-        };
-
-        const testBranchDetails = {
-            name: 'Test Branch',
-            address: '456 Test Avenue, Test City',
-            phone: '+63 998 765 4321',
-            email: 'test@branch.com'
-        };
-
-        const testServicesDetails = {
+            notes: 'This is a test email notification',
+            clientName: 'Test Client',
+            clientEmail: 'test@example.com',
+            clientPhone: '+1234567890',
+            clientAddress: '123 Test Street, Test City',
+            branchName: 'Test Branch',
+            branchAddress: '456 Test Avenue, Test City',
+            branchPhone: '+0987654321',
             services: [
-                { name: 'Test Service 1', category: 'Test Category', price: 750.00 },
-                { name: 'Test Service 2', category: 'Test Category', price: 750.00 }
+                { name: 'Test Service 1', category: 'Test Category', price: 100.00 },
+                { name: 'Test Service 2', category: 'Test Category', price: 150.00 }
             ],
-            totalCost: 1500.00
+            totalCost: 250.00,
+            created_at: new Date().toISOString()
         };
 
-        try {
-            const emailResult = await emailService.sendBookingConfirmation(
-                testBookingData,
-                testClientDetails,
-                testBranchDetails,
-                testServicesDetails
+        // Test different email types to show branch names in subjects
+        const emailTypes = ['booking_created', 'booking_updated', 'booking_status_changed'];
+        emailTypes.forEach(emailType => {
+            const emailContent = emailService.createEmailContent(emailType, testData);
+            console.log(`   ✅ ${emailType}: ${emailContent.subject}`);
+        });
+        console.log(`   ✅ Email HTML length: ${emailService.createEmailContent('booking_created', testData).html.length} characters`);
+        console.log('');
+
+        // Test 4: Test sending to a single email (if you want to test actual sending)
+        console.log('4️⃣ Testing single email sending...');
+        console.log('   ⚠️  This will send a real email if Gmail API is properly configured');
+        console.log('   💡 Set TEST_EMAIL environment variable to test with a real email address');
+        
+        const testEmail = process.env.TEST_EMAIL;
+        if (testEmail) {
+            console.log(`   📧 Testing with email: ${testEmail}`);
+            const singleEmailResult = await emailService.sendEmail(
+                testEmail, 
+                emailContent.subject, 
+                emailContent.html
             );
-
-            if (emailResult.success) {
-                console.log('✅ Test email sent successfully!');
-                console.log(`   Message ID: ${emailResult.messageId}`);
-                console.log(`   Sent at: ${emailResult.sent_at}`);
-                console.log('📧 Check your email inbox (and spam folder) for the test email');
-            } else {
-                console.log('❌ Test email failed:', emailResult.error);
+            console.log(`   ✅ Single email result: ${singleEmailResult.success ? 'SUCCESS' : 'FAILED'}`);
+            if (!singleEmailResult.success) {
+                console.log(`   ❌ Error: ${singleEmailResult.error}`);
             }
-        } catch (error) {
-            console.log('❌ Email sending error:', error.message);
+        } else {
+            console.log('   ⏭️  Skipping single email test (set TEST_EMAIL env var to test)');
         }
-    } else {
-        console.log('💡 To test email sending, set TEST_EMAIL environment variable');
-        console.log('   Example: TEST_EMAIL=your-email@example.com');
-    }
+        console.log('');
 
-    console.log('\n🎯 Email Service Test Complete!');
-    console.log('\n📚 Next Steps:');
-    console.log('1. Check your email inbox for test emails');
-    console.log('2. Verify accept/decline links work correctly');
-    console.log('3. Test with your actual frontend application');
-    console.log('4. Monitor email delivery and client responses');
+        // Test 5: Test notification system (without actually sending)
+        console.log('5️⃣ Testing notification system...');
+        console.log('   📋 This would send notifications to all relevant accounts');
+        console.log('   💡 Use the API endpoints to test actual sending');
+        console.log('');
+
+        // Test 6: Check service status
+        console.log('6️⃣ Service status summary...');
+        console.log(`   🔧 Email service initialized: ${initialized}`);
+        console.log(`   👥 Total accounts available: ${accounts.length}`);
+        console.log(`   🎯 Roles supported: ${Object.keys(accountsByRole).join(', ')}`);
+        console.log(`   📧 Gmail API ready: ${initialized}`);
+        console.log('');
+
+        console.log('🎉 Email service test completed successfully!');
+        console.log('');
+        console.log('📚 Next steps:');
+        console.log('   1. Test the API endpoints:');
+        console.log('      GET  /api/bookings/test-email-service');
+        console.log('      GET  /api/bookings/email-service-status');
+        console.log('      POST /api/bookings/send-email-notifications');
+        console.log('');
+        console.log('   2. Create a test booking to trigger automatic notifications');
+        console.log('   3. Monitor email delivery in your Gmail account');
+        console.log('   4. Check server logs for detailed results');
+
+    } catch (error) {
+        console.error('❌ Email service test failed:', error.message);
+        console.log('');
+        console.log('🔧 Troubleshooting tips:');
+        console.log('   1. Check your Google service account credentials');
+        console.log('   2. Ensure Gmail API is enabled in Google Cloud Console');
+        console.log('   3. Verify environment variables are set correctly');
+        console.log('   4. Check network connectivity to Google APIs');
+        console.log('');
+        console.log('📖 See EMAIL_NOTIFICATION_SYSTEM_README.md for detailed setup instructions');
+    }
 }
 
-// Run the test
-testEmailService().catch(error => {
-    console.error('❌ Test failed with error:', error);
-    process.exit(1);
-}); 
+// Run the test if this file is executed directly
+if (require.main === module) {
+    testEmailService();
+}
+
+module.exports = { testEmailService }; 

@@ -17,6 +17,19 @@ function isValidTimeFormat(time) {
   return timeRegex.test(time);
 }
 
+// Validate time slot object structure
+function isValidTimeSlotObject(timeSlot) {
+  return (
+    timeSlot &&
+    typeof timeSlot === 'object' &&
+    typeof timeSlot.time === 'string' &&
+    isValidTimeFormat(timeSlot.time) &&
+    typeof timeSlot.slot === 'number' &&
+    timeSlot.slot > 0 &&
+    Number.isInteger(timeSlot.slot)
+  );
+}
+
 router.get('/', (req, res) => {
   res.send('Time Slot API is running');
 });
@@ -40,11 +53,12 @@ router.post('/insertTimeSlot', async (req, res) => {
       });
     }
 
-    // Validate each time format in the array
-    for (const time of list_of_time) {
-      if (typeof time !== 'string' || !isValidTimeFormat(time)) {
+    // Validate each time slot object in the array
+    for (const timeSlot of list_of_time) {
+      timeSlot.slot = parseInt(timeSlot.slot);
+      if (!isValidTimeSlotObject(timeSlot)) {
         return res.status(400).json({ 
-          error: `Invalid time format: ${time}. Expected format: HH:MM AM/PM (e.g., "12:00 AM", "09:30 PM")` 
+          error: `Invalid time slot format: ${JSON.stringify(timeSlot)}. Expected format: { time: "HH:MM AM/PM", slot: number } (e.g., { time: "12:00 AM", slot: 8 })` 
         });
       }
     }
@@ -71,10 +85,21 @@ router.post('/insertTimeSlot', async (req, res) => {
     const timeSlotId = uuidv4();
     const dateCreated = now();
     
+    // Remove duplicates based on time
+    const uniqueTimeSlots = [];
+    const seenTimes = new Set();
+    
+    for (const timeSlot of list_of_time) {
+      if (!seenTimes.has(timeSlot.time)) {
+        seenTimes.add(timeSlot.time);
+        uniqueTimeSlots.push(timeSlot);
+      }
+    }
+    
     const timeSlotData = {
       id: timeSlotId,
       branch_id,
-      list_of_time: [...new Set(list_of_time)], // Remove duplicates
+      list_of_time: uniqueTimeSlots,
       date_created: dateCreated,
       date_updated: dateCreated,
       doc_type: 'TIME_BOOKING'
@@ -179,19 +204,37 @@ router.put('/updateTimeSlot/:id', async (req, res) => {
         });
       }
 
-      // Validate each time format in the array
-      for (const time of list_of_time) {
-        if (typeof time !== 'string' || !isValidTimeFormat(time)) {
+      // Validate each time slot object in the array
+      for (const timeSlot of list_of_time) {
+        timeSlot.slot = parseInt(timeSlot.slot);
+        if (!isValidTimeSlotObject(timeSlot)) {
           return res.status(400).json({ 
-            error: `Invalid time format: ${time}. Expected format: HH:MM AM/PM (e.g., "12:00 AM", "09:30 PM")` 
+            error: `Invalid time slot format: ${JSON.stringify(timeSlot)}. Expected format: { time: "HH:MM AM/PM", slot: number } (e.g., { time: "12:00 AM", slot: 8 })` 
           });
         }
       }
     }
 
     const prevData = timeSlotSnap.data();
+    let updatedListOfTime = prevData.list_of_time;
+    
+    if (list_of_time) {
+      // Remove duplicates based on time
+      const uniqueTimeSlots = [];
+      const seenTimes = new Set();
+      
+      for (const timeSlot of list_of_time) {
+        if (!seenTimes.has(timeSlot.time)) {
+          seenTimes.add(timeSlot.time);
+          uniqueTimeSlots.push(timeSlot);
+        }
+      }
+      
+      updatedListOfTime = uniqueTimeSlots;
+    }
+    
     const updateData = {
-      list_of_time: list_of_time ? [...new Set(list_of_time)] : prevData.list_of_time,
+      list_of_time: updatedListOfTime,
       date_updated: now()
     };
 
@@ -264,17 +307,33 @@ router.get('/getAvailableTimeSlots', async (req, res) => {
       .where('status', '==', 'scheduled')
       .get();
 
-    // Extract booked times
-    const bookedTimes = new Set();
+    // Count booked seats for each time slot
+    const bookedSeatsByTime = {};
     bookedSnapshot.forEach(doc => {
       const bookingData = doc.data();
       if (bookingData.time) {
-        bookedTimes.add(bookingData.time);
+        if (!bookedSeatsByTime[bookingData.time]) {
+          bookedSeatsByTime[bookingData.time] = 0;
+        }
+        // Assuming each booking takes 1 seat, adjust if different
+        bookedSeatsByTime[bookingData.time] += 1;
       }
     });
 
-    // Filter out booked times to get available time slots
-    const availableTimeSlots = allTimeSlots.filter(time => !bookedTimes.has(time));
+    // Filter and calculate available slots for each time slot
+    const availableTimeSlots = allTimeSlots.map(timeSlot => {
+      const bookedSeats = bookedSeatsByTime[timeSlot.time] || 0;
+      const totalSlots = timeSlot.slot || 0;
+      const availableSlots = Math.max(0, totalSlots - bookedSeats);
+      
+      return {
+        time: timeSlot.time,
+        slot: totalSlots, // Total capacity for this time slot
+        available_slots: availableSlots, // Available slots after subtracting booked
+        booked_slots: bookedSeats, // Number of slots already booked
+        is_available: availableSlots > 0 // Boolean flag for easy checking
+      };
+    }).filter(timeSlot => timeSlot.available_slots > 0); // Only show time slots with available seats
 
     // Return in the requested format
     const result = [{
@@ -288,5 +347,84 @@ router.get('/getAvailableTimeSlots', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+router.get('/getAvailableTimeSlotsClients', async (req, res) => {
+  try {
+    const { branch_id, date } = req.query;
+    
+    // Validate required fields
+    if (!branch_id || !date) {
+      return res.status(400).json({ 
+        error: 'Missing required fields. Please provide: branch_id and date' 
+      });
+    }
 
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(date)) {
+      return res.status(400).json({ 
+        error: 'Invalid date format. Expected format: YYYY-MM-DD (e.g., "2024-01-15")' 
+      });
+    }
+
+    // Get time slots for the branch
+    const timeSlotSnapshot = await firestore.collection(TIME_BOOKING_COLLECTION)
+      .where('branch_id', '==', branch_id)
+      .get();
+
+    if (timeSlotSnapshot.empty) {
+      return res.status(404).json({ 
+        error: 'No time slots found for this branch' 
+      });
+    }
+
+    const timeSlotData = timeSlotSnapshot.docs[0].data();
+    const allTimeSlots = timeSlotData.list_of_time;
+
+    // Get booked time slots for the specific branch and date with status 'scheduled'
+    const bookedSnapshot = await firestore.collection('bookings')
+      .where('branch_id', '==', branch_id)
+      .where('date', '==', date)
+      .where('status', '==', 'scheduled')
+      .get();
+
+    // Count booked seats for each time slot
+    const bookedSeatsByTime = {};
+    bookedSnapshot.forEach(doc => {
+      const bookingData = doc.data();
+      if (bookingData.time) {
+        if (!bookedSeatsByTime[bookingData.time]) {
+          bookedSeatsByTime[bookingData.time] = 0;
+        }
+        // Assuming each booking takes 1 seat, adjust if different
+        bookedSeatsByTime[bookingData.time] += 1;
+      }
+    });
+
+    // Filter and calculate available slots for each time slot
+    const availableTimeSlots = allTimeSlots.map(timeSlot => {
+      const bookedSeats = bookedSeatsByTime[timeSlot.time] || 0;
+      const totalSlots = timeSlot.slot || 0;
+      const availableSlots = Math.max(0, totalSlots - bookedSeats);
+      
+      return {
+        time: timeSlot.time,
+        slot: totalSlots, // Total capacity for this time slot
+        available_slots: availableSlots, // Available slots after subtracting booked
+        booked_slots: bookedSeats, // Number of slots already booked
+        is_available: availableSlots > 0 // Boolean flag for easy checking
+      };
+    }).filter(timeSlot => timeSlot.available_slots > 0); // Only show time slots with available seats
+
+    // Return in the requested format
+    const result = [{
+      branch_id: branch_id,
+      list_of_time: availableTimeSlots
+    }];
+
+    res.status(200).json(result);
+  } catch (error) {
+    console.error('Error fetching available time slots:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 module.exports = router;
