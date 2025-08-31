@@ -199,6 +199,79 @@ router.get('/getServicesByStatus/:status', async (req, res) => {
   }
 });
 
+// Get services grouped by category for a specific branch
+router.get('/getServicesByCategoryPerBranch/:branchId', async (req, res) => {
+  try {
+    const { branchId } = req.params;
+    
+    // First, get all services for the branch
+    const servicesSnapshot = await admin.firestore()
+      .collection(SERVICES_COLLECTION)
+      .where('branch_id', '==', branchId)
+      .get();
+    
+    if (servicesSnapshot.empty) {
+      return res.status(200).json({ data: [] });
+    }
+    
+    // Group services by category
+    const servicesByCategory = {};
+    
+    servicesSnapshot.forEach(doc => {
+      const serviceData = doc.data();
+      const categoryId = serviceData.category;
+      
+      if (!servicesByCategory[categoryId]) {
+        servicesByCategory[categoryId] = {
+          category: categoryId,
+          category_name: categoryId, // Will be updated with actual name
+          services: []
+        };
+      }
+      
+      servicesByCategory[categoryId].services.push({
+        id: serviceData.id,
+        name: serviceData.name,
+        description: serviceData.description,
+        price: serviceData.price,
+        status: serviceData.status,
+        date_created: serviceData.date_created
+      });
+    });
+    
+    // Get category names for each category ID
+    const categoryIds = Object.keys(servicesByCategory);
+    if (categoryIds.length > 0) {
+      const categoriesSnapshot = await admin.firestore()
+        .collection('categories')
+        .where('branch_id', '==', branchId)
+        .get();
+      
+      const categories = {};
+      categoriesSnapshot.forEach(doc => {
+        const categoryData = doc.data();
+        categories[doc.id] = categoryData.name;
+      });
+      
+      // Update category names and convert to array
+      const result = Object.values(servicesByCategory).map(categoryGroup => ({
+        category: categoryGroup.category,
+        category_name: categories[categoryGroup.category] || categoryGroup.category,
+        services: categoryGroup.services
+      }));
+      
+      return res.status(200).json({ data: result });
+    }
+    
+    // If no categories found, return empty array
+    return res.status(200).json({ data: [] });
+    
+  } catch (error) {
+    console.error('Error fetching services by category per branch:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get a single service by ID
 router.get('/getService/:id', async (req, res) => {
   try {
@@ -801,7 +874,7 @@ router.get('/downloadCSVTemplate', async (req, res) => {
   }
 });
 
-// for clients 
+// for clients - grouped by category
 router.get('/getServicesforClient/:branch_id', async (req, res) => {
   try {
     const { branch_id } = req.params;
@@ -815,12 +888,14 @@ router.get('/getServicesforClient/:branch_id', async (req, res) => {
     if (branchServiceSettings.empty) {
       return res.status(200).json({ data: [] });
     }
+    let show_price = true;
     // Extract service IDs from the settings
     const serviceIds = [];
     branchServiceSettings.forEach(doc => {
       const data = doc.data();
       if (data.service_ids && Array.isArray(data.service_ids)) {
         serviceIds.push(...data.service_ids);
+        show_price = data.show_price || false;
       }
     });
     // Remove duplicates
@@ -836,15 +911,25 @@ router.get('/getServicesforClient/:branch_id', async (req, res) => {
       .where('id', 'in', uniqueServiceIds)
       .get();
     
-    const services = [];
+    // Group services by category
+    const servicesByCategory = {};
+    
     servicesSnapshot.forEach(doc => {
       const serviceData = doc.data();
-      console.log(serviceData , 'serviceData')
-      services.push({
+      const categoryId = serviceData.category;
+      
+      if (!servicesByCategory[categoryId]) {
+        servicesByCategory[categoryId] = {
+          category: categoryId,
+          category_name: categoryId, // Will be updated with actual name
+          services: []
+        };
+      }
+      
+      servicesByCategory[categoryId].services.push({
         id: serviceData.id,
         name: serviceData.name,
         description: serviceData.description,
-        category: serviceData.category,
         price: serviceData.price,
         status: serviceData.status,
         branch_id: serviceData.branch_id,
@@ -852,7 +937,34 @@ router.get('/getServicesforClient/:branch_id', async (req, res) => {
       });
     });
     
-    res.status(200).json({ data: services });
+    // Get category names for each category ID
+    const categoryIds = Object.keys(servicesByCategory);
+    if (categoryIds.length > 0) {
+      const categoriesSnapshot = await admin.firestore()
+        .collection('categories')
+        .where('branch_id', '==', branch_id)
+        .get();
+      
+      const categories = {};
+      categoriesSnapshot.forEach(doc => {
+        const categoryData = doc.data();
+        categories[doc.id] = categoryData.name;
+      });
+      
+      // Update category names and convert to array
+      const result = Object.values(servicesByCategory).map(categoryGroup => ({
+        category: categoryGroup.category,
+        category_name: categories[categoryGroup.category] || categoryGroup.category,
+        show_price: show_price,
+        services: categoryGroup.services
+      }));
+      
+      return res.status(200).json({ data: result });
+    }
+    
+    // If no categories found, return empty array
+    return res.status(200).json({ data: [] });
+    
   } catch (error) {
     console.error('Error fetching services for client:', error);
     res.status(500).json({ error: error.message });

@@ -7,7 +7,8 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "build": "echo 'No build step required'",
-    "vercel-build": "echo 'Vercel build completed'"
+    "vercel-build": "echo 'Vercel build completed'",
+    "clear-calendar-sharing": "node update-iscalendarshared.js && node delete-calendar-events.js"
   },
   "dependencies": {
     "@google-cloud/firestore": "7.11.3",

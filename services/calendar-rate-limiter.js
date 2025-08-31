@@ -135,6 +135,7 @@ class CalendarRateLimiter {
     }
     
     async shareCalendar(calendar, calendarId, aclData) {
+        console.log('Sharing calendar with ACL data:', aclData);
         return this.makeRequest(() => 
             calendar.acl.insert({ calendarId, requestBody: aclData })
         );

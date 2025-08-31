@@ -146,11 +146,8 @@ class EmailService {
                                 <div style="background-color: #f3e5f5; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
                                     <h3 style="color: #7b1fa2; margin: 0 0 15px 0;">💼 Services Booked</h3>
                                     <ul style="margin: 0; padding-left: 20px;">
-                                        ${data.services.map(service => `<li>${service.name} (${service.category}) - ₱${service.price.toFixed(2)}</li>`).join('')}
+                                        ${data.services.map(service => `<li>${service.name} (${service.category}) </li>`).join('')}
                                     </ul>
-                                    <p style="margin-top: 15px; font-weight: bold; color: #7b1fa2;">
-                                        Total Cost: ₱${data.totalCost.toFixed(2)}
-                                    </p>
                                 </div>
                                 ` : ''}
 
@@ -211,7 +208,7 @@ class EmailService {
                                 <div style="background-color: #f3e5f5; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
                                     <h3 style="color: #7b1fa2; margin: 0 0 15px 0;">💼 Services Booked</h3>
                                     <ul style="margin: 0; padding-left: 20px;">
-                                        ${data.services.map(service => `<li>${service.name} (${service.category}) - ₱${service.price.toFixed(2)}</li>`).join('')}
+                                        ${data.services.map(service => `<li>${service.name} (${service.category})</li>`).join('')}
                                     </ul>
                                     <p style="margin-top: 15px; font-weight: bold; color: #7f8c8d; font-size: 12px;">
                                         Total Cost: ₱${data.totalCost.toFixed(2)}
@@ -277,11 +274,8 @@ class EmailService {
                                 <div style="background-color: #f3e5f5; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
                                     <h3 style="color: #7b1fa2; margin: 0 0 15px 0;">💼 Services Booked</h3>
                                     <ul style="margin: 0; padding-left: 20px;">
-                                        ${data.services.map(service => `<li>${service.name} (${service.category}) - ₱${service.price.toFixed(2)}</li>`).join('')}
+                                        ${data.services.map(service => `<li>${service.name} (${service.category}) </li>`).join('')}
                                     </ul>
-                                    <p style="margin-top: 15px; font-weight: bold; color: #7b1fa2;">
-                                        Total Cost: ₱${data.totalCost.toFixed(2)}
-                                    </p>
                                 </div>
                                 ` : ''}
 
@@ -307,7 +301,56 @@ class EmailService {
                         </div>
                     `
                 };
-
+            // create new case for booking confirmation for client to check the calendar invites 
+            case 'booking_confirmation_for_client':
+                return {
+                    subject: `Booking Confirmation - ${branchName}. Please check your calendar invites`,
+                    html: `
+                        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f9f9f9;">
+                            <div style="background-color: #ffffff; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                                <h2 style="color: #2c3e50; text-align: center; margin-bottom: 30px;">📅 Booking Confirmation Notification</h2>
+                                <div style="background-color: #e8f5e8; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                                    <h3 style="color: #27ae60; margin: 0 0 15px 0;">✅ Booking Details</h3>
+                                    <p><strong>Booking ID:</strong> ${data.booking_id}</p>
+                                    <p><strong>Date:</strong> ${data.date}</p>
+                                    <p><strong>Time:</strong> ${data.time}</p>
+                                    <p><strong>Status:</strong> <span style="color: #27ae60; font-weight: bold;">${data.status.toUpperCase()}</span></p>
+                                </div>
+                                <div style="background-color: #e3f2fd; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                                    <h3 style="color: #1976d2; margin: 0 0 15px 0;">👤 Client Information</h3>
+                                    <p><strong>Name:</strong> ${data.clientName}</p>
+                                    <p><strong>Email:</strong> ${data.clientEmail}</p>
+                                    <p><strong>Phone:</strong> ${data.clientPhone}</p>
+                                    ${data.clientAddress ? `<p><strong>Address:</strong> ${data.clientAddress}</p>` : ''}
+                                </div>
+                                <div style="background-color: #fff3e0; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                                    <h3 style="color: #f57c00; margin: 0 0 15px 0;">🏢 Branch Information</h3>
+                                    <p><strong>Branch:</strong> ${data.branchName}</p>
+                                    <p><strong>Location:</strong> ${data.branchAddress}</p>
+                                    <p><strong>Contact:</strong> ${data.branchPhone}</p>
+                                </div>
+                                ${data.services && data.services.length > 0 ? `
+                                <div style="background-color: #f3e5f5; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                                    <h3 style="color: #7b1fa2; margin: 0 0 15px 0;">💼 Services Booked</h3>
+                                    <ul style="margin: 0; padding-left: 20px;">
+                                        ${data.services.map(service => `<li>${service.name} (${service.category}) </li>`).join('')}
+                                    </ul>
+                                </div>
+                                ` : ''}
+                                <div style="text-align: center; margin-top: 30px;">
+                                    <a href="https://calendar.google.com/calendar/u/0/r" 
+                                       style="background-color: #3498db; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
+                                        View Google Calendar
+                                    </a>
+                                </div>
+                                <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #7f8c8d; font-size: 12px;">
+                                    <p>This is an automated notification from the ${data.branchName} Booking System.</p>
+                                    <p>Sent on ${moment.tz('Asia/Manila').format('MMMM DD, YYYY [at] h:mm A')}</p>
+                                </div>
+                            </div>
+                        </div>
+                    `
+                };
             default:
                 return {
                     subject: `Notification from ${branchName}`,
@@ -367,6 +410,25 @@ class EmailService {
             };
         }
     }
+// sendNotificationEmailsForClient
+    async sendNotificationEmailsForClient(type, data, branchId = null) {
+        try {
+            console.log(`Sending ${type} notification emails for client: ${branchId || 'all branches'}`); 
+            const emailContent = this.createEmailContent(type, data);
+            // send to the affected client email
+            const emailResult = await this.sendEmail(data.clientEmail, emailContent.subject, emailContent.html, data.branchName || 'Michiko POS', data.branchEmail);
+            return emailResult;
+
+        }
+        catch (error) {
+            console.error(`Failed to send ${type} notification emails for client: ${branchId || 'all branches'}`, error);
+            return {
+                success: false,
+                error: error.message,
+                to: to
+            };
+        }
+    }
 
     // Send notification emails to all relevant accounts
     async sendNotificationEmails(type, data, branchId = null) {
@@ -395,6 +457,8 @@ class EmailService {
             const emailPromises = accounts.map(account => 
                 this.sendEmail(account.email, emailContent.subject, emailContent.html, data.branchName || 'Michiko POS', data.branchEmail)
             );
+            
+
 
             const results = await Promise.all(emailPromises);
             
@@ -452,6 +516,7 @@ class EmailService {
         }
     }
 
+     
     // Send booking created notification
     async sendBookingCreatedNotification(bookingData, clientDetails, branchDetails, servicesDetails) {
         const emailData = {
@@ -474,6 +539,27 @@ class EmailService {
         };
 
         return await this.sendNotificationEmails('booking_created', emailData, bookingData.branch_id);
+    }
+    // Send booking confirmation for client to check the calendar invites
+    async sendBookingConfirmationForClient(bookingData, clientDetails, branchDetails, servicesDetails) {
+        const emailData = {
+            booking_id: bookingData.booking_id,
+            date: bookingData.date,
+            time: bookingData.time,
+            status: bookingData.status,
+            notes: bookingData.notes || '',
+            clientName: clientDetails.name,
+            clientEmail: clientDetails.email,
+            clientPhone: clientDetails.phone,
+            clientAddress: clientDetails.address,
+            branchName: branchDetails.name,
+            branchAddress: branchDetails.address,
+            branchPhone: branchDetails.phone,
+            branchEmail: branchDetails.email,
+            services: servicesDetails.services,
+            created_at: bookingData.created_at
+        };
+        return await this.sendNotificationEmailsForClient('booking_confirmation_for_client', emailData, bookingData.branch_id);
     }
 
     // Send booking updated notification

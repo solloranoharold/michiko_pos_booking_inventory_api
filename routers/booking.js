@@ -26,7 +26,8 @@ const {
     getBranchAuthorizedEmails,
     shareCalendarWithMasterAdmins,
     checkCalendarPermissions,
-    shareCalendarWithBranchAuthorizedUsers
+    shareCalendarWithBranchAuthorizedUsers,
+    sendBookingConfirmationForClient
 } = require('../services/booking-helpers.js');
 
 const router = express.Router();
@@ -342,6 +343,7 @@ Created: ${created_at}
                         branchDetails,
                         servicesDetails
                     );
+                 
                     
                     if (emailResult.success) {
                         console.log(`Confirmation email sent successfully to ${clientDetails.email}`);
@@ -351,6 +353,24 @@ Created: ${created_at}
                 } catch (emailError) {
                     console.error('Error sending confirmation email:', emailError);
                     emailResult = {
+                        success: false,
+                        error: emailError.message,
+                        skipped: false
+                    };
+                }
+                // send also email for client affected
+                let emailResultForClient = null;
+                try {
+                    console.log(`Sending confirmation email to client ${clientDetails.email} for booking ${booking_id}`);
+                    emailResultForClient = await emailService.sendBookingConfirmationForClient(
+                        enhancedBookingData,
+                        clientDetails,
+                        branchDetails,
+                        servicesDetails
+                    );
+                } catch (emailError) {
+                    console.error('Error sending confirmation email:', emailError);
+                    emailResultForClient = {
                         success: false,
                         error: emailError.message,
                         skipped: false
@@ -378,6 +398,8 @@ Created: ${created_at}
                     },
                     email_sent: emailResult?.success || false,
                     email_details: emailResult,
+                    email_sent_for_client: emailResultForClient?.success || false,
+                    email_details_for_client: emailResultForClient,
                     estimated_total_cost: totalCost,
                     background_color: getStatusBackgroundColor(status),
                     client_details: clientDetails,
@@ -760,7 +782,24 @@ Created: ${created_at}
                         skipped: false
                     };
                 }
-
+                   // send also email for client affected
+                   let emailResultForClient = null;
+                   try {
+                       console.log(`Sending confirmation email to client ${clientDetails.email} for booking ${booking_id}`);
+                       emailResultForClient = await emailService.sendBookingConfirmationForClient(
+                           enhancedBookingData,
+                           clientDetails,
+                           branchDetails,
+                           servicesDetails
+                       );
+                   } catch (emailError) {
+                       console.error('Error sending confirmation email:', emailError);
+                       emailResultForClient = {
+                           success: false,
+                           error: emailError.message,
+                           skipped: false
+                       };
+                   }
                 res.status(201).json({ 
                     message: 'Branch booking created successfully with dedicated calendar', 
                     booking_id,
@@ -782,6 +821,8 @@ Created: ${created_at}
                     },
                     email_sent: emailResult?.success || false,
                     email_details: emailResult,
+                    email_sent_for_client: emailResultForClient?.success || false,
+                    email_details_for_client: emailResultForClient,
                     estimated_total_cost: totalCost,
                     background_color: getStatusBackgroundColor(status),
                     client_details: clientDetails,
@@ -1397,6 +1438,7 @@ router.get('/test-calendar-setup', async (req, res) => {
             email: process.env.GOOGLE_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL,
             key: (process.env.GOOGLE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY)?.replace(/\\n/g, '\n'),
             scopes,
+            subject: process.env.GOOGLE_WORKSPACE_EMAIL 
         });
         
         const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
